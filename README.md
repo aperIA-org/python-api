@@ -27,26 +27,6 @@ curl http://127.0.0.1:8000/health
 docker compose down
 ```
 
-## Executando com Docker
-
-1. Build da imagem:
-
-```bash
-docker build -t python-api .
-```
-
-2. Subir o container:
-
-```bash
-docker run --rm -p 8000:8000 python-api
-```
-
-3. Testar health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
 ## Rotas
 
 - `GET /health`
@@ -58,7 +38,3 @@ Resposta esperada:
   "status": "ok"
 }
 ```
-
-## Parar o container
-
-Pressione `Ctrl + C` no terminal onde o `docker run` estiver em execucao.

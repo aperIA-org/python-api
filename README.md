@@ -4,34 +4,47 @@ API simples em Python usando FastAPI.
 
 ## Requisitos
 
-- Python 3.10+
+- Docker
+- Docker Compose
 
-## Instalação
+## Executando com Docker Compose
+
+1. Subir a API:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+docker compose up --build
 ```
 
-## Executando
+2. Testar health check:
 
 ```bash
-uvicorn main:app --reload
+curl http://127.0.0.1:8000/health
 ```
 
-## Makefile
-
-O projeto possui um `Makefile` para facilitar a execução da API.
-
-Comando disponível:
-
-- `make run`: sobe a aplicação em `127.0.0.1:8000` com recarregamento automático.
-
-Uso:
+3. Parar e remover os recursos:
 
 ```bash
-make run
+docker compose down
+```
+
+## Executando com Docker
+
+1. Build da imagem:
+
+```bash
+docker build -t python-api .
+```
+
+2. Subir o container:
+
+```bash
+docker run --rm -p 8000:8000 python-api
+```
+
+3. Testar health check:
+
+```bash
+curl http://127.0.0.1:8000/health
 ```
 
 ## Rotas
@@ -42,6 +55,10 @@ Resposta esperada:
 
 ```json
 {
-	"status": "ok"
+  "status": "ok"
 }
 ```
+
+## Parar o container
+
+Pressione `Ctrl + C` no terminal onde o `docker run` estiver em execucao.

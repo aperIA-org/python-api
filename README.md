@@ -20,6 +20,20 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+## Makefile
+
+O projeto possui um `Makefile` para facilitar a execução da API.
+
+Comando disponível:
+
+- `make run`: sobe a aplicação em `127.0.0.1:8000` com recarregamento automático.
+
+Uso:
+
+```bash
+make run
+```
+
 ## Rotas
 
 - `GET /health`

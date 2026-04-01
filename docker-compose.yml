@@ -1,0 +1,8 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: python-api
+    ports:
+      - "8000:8000"

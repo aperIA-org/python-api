@@ -8,6 +8,8 @@ from app.domain.repositories.user_repository import UserRepository
 from app.infrastructure.persistence.models.user_model import UserModel
 
 password_hasher = PasswordHasher()
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9 ]+$")
+MAX_PASSWORD_LENGTH = 128
 
 class CreateUserUseCase:
     def __init__(self, user_repository: UserRepository) -> None:
@@ -15,9 +17,9 @@ class CreateUserUseCase:
 
     def execute(
         self,
-        username: str | None,
-        password: str | None,
-        email: str | None,
+        username: str,
+        password: str,
+        email: str,
     ) -> UserModel:
         parsed_username = self._parse_input(username)
         parsed_password = self._parse_input(password)
@@ -38,9 +40,7 @@ class CreateUserUseCase:
             email=parsed_email,
         )
 
-    def _parse_input(self, value: str | None) -> str:
-        if value is None:
-            raise UserValidationError("Campos username, password e email sao obrigatorios")
+    def _parse_input(self, value: str) -> str:
         normalized = unicodedata.normalize("NFKC", value).strip()
         if not normalized:
             raise UserValidationError("Campos username, password e email sao obrigatorios")
@@ -51,6 +51,8 @@ class CreateUserUseCase:
             raise UserValidationError("E-mail invalido")
 
     def _validate_password(self, password: str) -> None:
+        if len(password) > MAX_PASSWORD_LENGTH:
+            raise UserValidationError("Senha muito longa: maximo de 128 caracteres")
         if len(password) < 8:
             raise UserValidationError("Senha fraca: minimo de 8 caracteres")
         has_upper = re.search(r"[A-Z]", password) is not None
@@ -63,7 +65,7 @@ class CreateUserUseCase:
             )
 
     def _validate_username(self, username: str) -> None:
-        if not all(char.isalnum() or char == " " for char in username):
+        if not USERNAME_PATTERN.fullmatch(username):
             raise UserValidationError(
                 "Username invalido: use apenas letras, numeros e espaco"
             )

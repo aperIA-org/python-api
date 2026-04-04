@@ -1,20 +1,24 @@
 import uuid
+from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class UserCreate(BaseModel):
-    username: str | None = None
-    password: str | None = None
-    email: str | None = None
+    username: str = Field(..., min_length=1, max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    email: str = Field(..., min_length=3, max_length=500)
+
+    model_config = ConfigDict(extra="forbid")
 
 class UserCreatedResponse(BaseModel):
     id: uuid.UUID
 
 class UserResponse(BaseModel):
     id: uuid.UUID
-    username: str | None
-    password: str | None
-    email: str | None
+    username: str
+    email: str
+    created_at: datetime | None
+    updated_at: datetime | None
 
     model_config = {"from_attributes": True}

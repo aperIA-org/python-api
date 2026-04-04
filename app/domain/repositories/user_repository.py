@@ -13,8 +13,8 @@ class UserRepository(Protocol):
 
     def insert(
         self,
-        username: str | None,
-        password: str | None,
-        email: str | None,
+        username: str,
+        password: str,
+        email: str,
     ) -> UserModel:
         ...

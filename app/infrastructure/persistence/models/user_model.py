@@ -17,9 +17,9 @@ class UserModel(Base):
         nullable=False,
         server_default=func.gen_random_uuid(),
     )
-    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    password: Mapped[str | None] = mapped_column(Text, nullable=True)
-    email: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+    password: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime,
         nullable=True,

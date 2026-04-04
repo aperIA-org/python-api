@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.application.exceptions import UserValidationError
@@ -25,6 +25,11 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserCreat
         )
     except UserValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
+        if "duplicate key value" in message and "email" in message:
+            raise HTTPException(status_code=409, detail="E-mail ja cadastrado") from exc
+        raise
     except ProgrammingError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
         if "insufficientprivilege" in message or "permission denied" in message:

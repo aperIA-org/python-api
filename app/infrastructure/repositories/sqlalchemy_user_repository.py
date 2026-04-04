@@ -21,11 +21,15 @@ class SQLAlchemyUserRepository(UserRepository):
 
     def insert(
         self,
-        username: str | None,
-        password: str | None,
-        email: str | None,
+        username: str,
+        password: str,
+        email: str,
     ) -> UserModel:
-        user = UserModel(username=username, password=password, email=email)
+        user = UserModel(
+            username=username,
+            password=password,
+            email=email.strip().lower(),
+        )
         try:
             self.db.add(user)
             self.db.commit()

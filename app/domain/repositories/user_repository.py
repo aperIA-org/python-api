@@ -1,11 +1,11 @@
 import uuid
 from typing import Protocol
 
-from app.infrastructure.persistence.models.user_model import UserModel
+from app.domain.entities.user import User
 
 
 class UserRepository(Protocol):
-    def get_by_id(self, user_id: uuid.UUID) -> UserModel | None:
+    def get_by_id(self, user_id: uuid.UUID) -> User | None:
         ...
 
     def exists_by_email(self, email: str) -> bool:
@@ -16,5 +16,5 @@ class UserRepository(Protocol):
         username: str,
         password: str,
         email: str,
-    ) -> UserModel:
+    ) -> User:
         ...

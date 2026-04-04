@@ -4,8 +4,8 @@ import unicodedata
 from argon2 import PasswordHasher
 
 from app.application.exceptions import UserValidationError
+from app.domain.entities.user import User
 from app.domain.repositories.user_repository import UserRepository
-from app.infrastructure.persistence.models.user_model import UserModel
 
 password_hasher = PasswordHasher()
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9 ]+$")
@@ -20,7 +20,7 @@ class CreateUserUseCase:
         username: str,
         password: str,
         email: str,
-    ) -> UserModel:
+    ) -> User:
         parsed_username = self._parse_input(username)
         parsed_password = self._parse_input(password)
         parsed_email = self._parse_input(email).lower()

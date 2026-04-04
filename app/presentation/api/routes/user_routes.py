@@ -28,14 +28,14 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserCreat
     except IntegrityError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
         if "duplicate key value" in message and "email" in message:
-            raise HTTPException(status_code=409, detail="E-mail ja cadastrado") from exc
+            raise HTTPException(status_code=409, detail="E-mail já cadastrado") from exc
         raise
     except ProgrammingError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
         if "insufficientprivilege" in message or "permission denied" in message:
             raise HTTPException(
                 status_code=500,
-                detail="Usuario do banco sem permissao para inserir na tabela users",
+                detail="Usuário do banco sem permissão para inserir na tabela users",
             ) from exc
         raise
     return UserCreatedResponse(id=user.id)
@@ -46,5 +46,5 @@ def get_user(user_id: uuid.UUID, db: Session = Depends(get_db)) -> UserResponse:
     get_user_use_case = GetUserUseCase(repository)
     user = get_user_use_case.execute(user_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
     return UserResponse.model_validate(user)

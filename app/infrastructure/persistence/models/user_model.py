@@ -5,6 +5,7 @@ from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.infrastructure.common.datetime_provider import now_brasilia
 from app.infrastructure.persistence.models.base import Base
 
 class UserModel(Base):
@@ -19,5 +20,14 @@ class UserModel(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password: Mapped[str | None] = mapped_column(Text, nullable=True)
     email: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        default=now_brasilia,
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        default=now_brasilia,
+        onupdate=now_brasilia,
+    )

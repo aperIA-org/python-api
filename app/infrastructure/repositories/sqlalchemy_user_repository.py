@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.domain.repositories.user_repository import UserRepository
@@ -12,6 +13,11 @@ class SQLAlchemyUserRepository(UserRepository):
 
     def get_by_id(self, user_id: uuid.UUID) -> UserModel | None:
         return self.db.get(UserModel, user_id)
+
+    def exists_by_email(self, email: str) -> bool:
+        normalized_email = email.lower()
+        query = self.db.query(UserModel.id).filter(func.lower(UserModel.email) == normalized_email)
+        return self.db.query(query.exists()).scalar() or False
 
     def insert(
         self,

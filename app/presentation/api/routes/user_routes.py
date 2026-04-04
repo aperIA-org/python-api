@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
+from app.application.exceptions import UserValidationError
 from app.application.use_cases.create_user_use_case import CreateUserUseCase
 from app.application.use_cases.get_user_use_case import GetUserUseCase
 from app.infrastructure.database.sqlalchemy import get_db
@@ -22,6 +23,8 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserRespo
             password=payload.password,
             email=payload.email,
         )
+    except UserValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ProgrammingError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
         if "insufficientprivilege" in message or "permission denied" in message:

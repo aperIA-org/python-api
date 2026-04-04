@@ -9,12 +9,12 @@ from app.application.use_cases.create_user_use_case import CreateUserUseCase
 from app.application.use_cases.get_user_use_case import GetUserUseCase
 from app.infrastructure.database.sqlalchemy import get_db
 from app.infrastructure.repositories.sqlalchemy_user_repository import SQLAlchemyUserRepository
-from app.presentation.schemas.user_schema import UserCreate, UserResponse
+from app.presentation.schemas.user_schema import UserCreate, UserCreatedResponse, UserResponse
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-@router.post("", response_model=UserResponse, status_code=201)
-def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserResponse:
+@router.post("", response_model=UserCreatedResponse, status_code=201)
+def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserCreatedResponse:
     repository = SQLAlchemyUserRepository(db)
     create_user_use_case = CreateUserUseCase(repository)
     try:
@@ -33,7 +33,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserRespo
                 detail="Usuario do banco sem permissao para inserir na tabela users",
             ) from exc
         raise
-    return UserResponse.model_validate(user)
+    return UserCreatedResponse(id=user.id)
 
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(user_id: uuid.UUID, db: Session = Depends(get_db)) -> UserResponse:

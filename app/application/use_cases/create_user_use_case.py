@@ -1,10 +1,13 @@
 import re
 import unicodedata
 
+from argon2 import PasswordHasher
+
 from app.application.exceptions import UserValidationError
 from app.domain.repositories.user_repository import UserRepository
 from app.infrastructure.persistence.models.user_model import UserModel
 
+password_hasher = PasswordHasher()
 
 class CreateUserUseCase:
     def __init__(self, user_repository: UserRepository) -> None:
@@ -24,12 +27,14 @@ class CreateUserUseCase:
         self._validate_password(parsed_password)
         self._validate_email(parsed_email)
 
+        hashed_password = password_hasher.hash(parsed_password)
+
         if self.user_repository.exists_by_email(parsed_email):
             raise UserValidationError("E-mail já cadastrado")
 
         return self.user_repository.insert(
             username=parsed_username,
-            password=parsed_password,
+            password=hashed_password,
             email=parsed_email,
         )
 

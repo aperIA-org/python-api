@@ -152,6 +152,12 @@ Tabela principal `users`:
 
 ## 6. Configuracao de Ambiente
 
+Importante sobre este repositorio:
+
+- O `docker-compose.yml` atual sobe apenas o servico da API.
+- Nao existe servico `db` (PostgreSQL) no Compose deste projeto.
+- Portanto, para rodar `POST /users` e `GET /users/{user_id}`, voce precisa de um PostgreSQL externo (exemplo: cloud) corretamente configurado nas variaveis.
+
 Variaveis aceitas:
 
 - `DATABASE_URL` (prioridade maxima).
@@ -168,21 +174,26 @@ Ordem de resolucao:
 2. Arquivo `.env` local.
 3. Valor padrao do codigo.
 
-Exemplo de `.env`:
+Exemplo de `.env` para banco em cloud (recomendado neste projeto):
 
 ```env
-DB_HOST=db
+DB_HOST=seu-host-postgres-cloud
 DB_PORT=5432
 DB_NAME=postgres
-DB_USER=postgres
-DB_PASSWORD=postgres
+DB_USER=python_api
+DB_PASSWORD=sua-senha-segura
 DB_FORCE_IPV4=false
 ```
+
+Observacao sobre `DB_HOST=db`:
+
+- Use `DB_HOST=db` somente se voce adicionar manualmente um servico PostgreSQL no Compose com nome `db`.
+- Se mantiver o Compose atual (somente API), `DB_HOST=db` nao funciona.
 
 Exemplo usando URL unica:
 
 ```env
-DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/postgres
+DATABASE_URL=postgresql+psycopg://python_api:sua-senha-segura@seu-host-postgres-cloud:5432/postgres
 ```
 
 ## 7. Execucao Local com Docker
@@ -194,6 +205,8 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/postgres
 
 ### 7.2 Subir aplicacao
 
+Antes de subir, configure o `.env` apontando para um PostgreSQL acessivel (normalmente cloud neste projeto).
+
 ```bash
 docker compose up --build
 ```
@@ -203,6 +216,12 @@ docker compose up --build
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+Nota:
+
+- `GET /health` valida apenas disponibilidade da API.
+- Esse endpoint nao garante que o banco esta acessivel.
+- Para validar banco, teste tambem uma rota que acessa dados, como `POST /users`.
 
 ### 7.4 Parar
 
@@ -253,11 +272,13 @@ Recomendacoes adicionais para nuvem:
 
 ## 11. Guia Rapido para Novos Desenvolvedores
 
-1. Suba a stack com Docker Compose.
-2. Chame `GET /health`.
-3. Crie usuario via `POST /users`.
-4. Consulte o usuario por UUID em `GET /users/{user_id}`.
-5. Em caso de erro, inspecione logs e valide variaveis de ambiente.
+1. Garanta um PostgreSQL acessivel (cloud ou local externo ao Compose atual).
+2. Configure o `.env` com `DATABASE_URL` ou `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD` validos.
+3. Suba a API com Docker Compose.
+4. Chame `GET /health` para validar que a API iniciou.
+5. Teste `POST /users` para validar conectividade com banco.
+6. Consulte o usuario por UUID em `GET /users/{user_id}`.
+7. Em caso de erro, inspecione logs e valide variaveis de ambiente/rede.
 
 ## 12. Avaliacao em 3 Perfis e Ajustes Aplicados
 

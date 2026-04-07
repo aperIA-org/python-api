@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: python-api
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     networks:

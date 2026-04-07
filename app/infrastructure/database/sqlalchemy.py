@@ -1,4 +1,5 @@
 from collections.abc import Generator
+import os
 from pathlib import Path
 import socket
 from urllib.parse import quote_plus
@@ -10,6 +11,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 env_values = dotenv_values(ENV_PATH)
+
+
+def _get_env(key: str, default: str | None = None) -> str | None:
+    return os.getenv(key) or env_values.get(key) or default
 
 
 def _normalize_scheme(url: str) -> str:
@@ -25,7 +30,7 @@ def _to_bool(value: str | None) -> bool:
 
 
 def _append_ipv4_hostaddr(url: str) -> str:
-    if not _to_bool(env_values.get("DB_FORCE_IPV4")):
+    if not _to_bool(_get_env("DB_FORCE_IPV4")):
         return url
 
     parsed_url = make_url(url)
@@ -45,15 +50,15 @@ def _append_ipv4_hostaddr(url: str) -> str:
 
 
 def _build_database_url() -> str:
-    direct_url = env_values.get("DATABASE_URL")
+    direct_url = _get_env("DATABASE_URL")
     if direct_url:
         return _append_ipv4_hostaddr(_normalize_scheme(direct_url))
 
-    user = quote_plus(env_values.get("DB_USER") or "postgres")
-    password = quote_plus(env_values.get("DB_PASSWORD") or "postgres")
-    host = env_values.get("DB_HOST") or "db"
-    port = env_values.get("DB_PORT") or "5432"
-    name = env_values.get("DB_NAME") or "postgres"
+    user = quote_plus(_get_env("DB_USER", "postgres") or "postgres")
+    password = quote_plus(_get_env("DB_PASSWORD", "postgres") or "postgres")
+    host = _get_env("DB_HOST", "db") or "db"
+    port = _get_env("DB_PORT", "5432") or "5432"
+    name = _get_env("DB_NAME", "postgres") or "postgres"
     built_url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{name}"
     return _append_ipv4_hostaddr(built_url)
 

@@ -22,10 +22,11 @@ class CreateUserUseCase:
         email: str,
     ) -> User:
         parsed_username = self._parse_input(username)
-        parsed_password = self._parse_input(password)
+        parsed_password = password
         parsed_email = self._parse_input(email).lower()
 
         self._validate_username(parsed_username)
+        self._validate_password_presence(parsed_password)
         self._validate_password(parsed_password)
         self._validate_email(parsed_email)
 
@@ -49,6 +50,10 @@ class CreateUserUseCase:
     def _validate_email(self, email: str) -> None:
         if not re.fullmatch(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
             raise UserValidationError("E-mail invalido")
+
+    def _validate_password_presence(self, password: str) -> None:
+        if password is None or password == "":
+            raise UserValidationError("Campo password é obrigatorio")
 
     def _validate_password(self, password: str) -> None:
         if len(password) > MAX_PASSWORD_LENGTH:

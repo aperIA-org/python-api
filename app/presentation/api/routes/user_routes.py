@@ -35,7 +35,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserCreat
         if "insufficientprivilege" in message or "permission denied" in message:
             raise HTTPException(
                 status_code=500,
-                detail="Usuário do banco sem permissão para inserir na tabela users",
+                detail="Internal server error",
             ) from exc
         raise
     return UserCreatedResponse(id=user.id)

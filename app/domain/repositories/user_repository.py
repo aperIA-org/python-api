@@ -1,4 +1,6 @@
 import uuid
+from typing import Optional
+
 from typing import Protocol
 
 from app.domain.entities.user import User
@@ -17,4 +19,7 @@ class UserRepository(Protocol):
         password: str,
         email: str,
     ) -> User:
+        ...
+
+    async def find_by_email(self, email: str) -> Optional[object]:
         ...

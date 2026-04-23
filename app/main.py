@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.infrastructure.database.sqlalchemy import engine
+from app.presentation.api.routes.auth_routes import router as auth_router
 from app.presentation.api.routes.health_routes import router as health_router
 from app.presentation.api.routes.user_routes import router as user_router
 
@@ -26,3 +27,4 @@ def init_database() -> None:
 
 app.include_router(health_router)
 app.include_router(user_router)
+app.include_router(auth_router)

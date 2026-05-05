@@ -4,6 +4,26 @@ API simples em Python usando FastAPI.
 
 Arquitetura organizada em DDD com camadas em `app/domain`, `app/infrastructure` e `app/presentation`.
 
+## Estrutura criada
+
+```text
+.
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── main.py
+├── app/
+│   ├── main.py
+│   ├── config.py
+│   ├── application/
+│   ├── domain/
+│   ├── infrastructure/
+│   └── presentation/
+└── tests/
+```
+
+Observacao: a execucao do projeto agora e baseada em Docker (sem fluxo de Makefile/venv no README).
+
 ## Configuracao com .env (recomendado)
 
 Para evitar configurar variaveis manualmente no terminal a cada execucao, prefira usar um arquivo .env na raiz do projeto.
@@ -50,7 +70,7 @@ DB_FORCE_IPV4=true
 
 ## Executando com Docker Compose
 
-1. Subir a API:
+1. Construir e subir a API:
 
 ```bash
 docker compose up --build

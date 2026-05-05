@@ -1,7 +1,8 @@
 import uuid
+from typing import Optional
 
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.domain.entities.user import User
@@ -22,6 +23,12 @@ class SQLAlchemyUserRepository(UserRepository):
         normalized_email = email.lower()
         query = self.db.query(UserModel.id).filter(func.lower(UserModel.email) == normalized_email)
         return self.db.query(query.exists()).scalar() or False
+
+    async def find_by_email(self, email: str) -> Optional[UserModel]:
+        result = self.db.execute(
+            select(UserModel).where(UserModel.email == email)
+        )
+        return result.scalar_one_or_none()
 
     def insert(
         self,

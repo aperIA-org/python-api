@@ -1,97 +1,200 @@
-import hmac
-import hashlib
+import time
+from typing import Literal
 
-import structlog
 import httpx
+import jwt
+import structlog
 
 from core.config import settings
 from core.exceptions import GitHubClientError, InvalidWebhookSignature
+from core.security import verify_github_signature
 
 logger = structlog.get_logger()
 
-# TODO: validar com doc oficial — GitHub REST API v3 + GitHub Apps
+_GITHUB_API = "https://api.github.com"
+_ACCEPT = "application/vnd.github+json"
+_API_VERSION = "2022-11-28"
+
+
+def _generate_app_jwt() -> str:
+    """JWT para autenticar como GitHub App — válido por 10 min."""
+    now = int(time.time())
+    with open(settings.GITHUB_PRIVATE_KEY_PATH) as f:
+        private_key = f.read()
+    return jwt.encode(
+        {"iat": now - 60, "exp": now + 600, "iss": settings.GITHUB_APP_ID},
+        private_key,
+        algorithm="RS256",
+    )
+
+
+def get_installation_token(installation_id: int) -> str:
+    """Token escopado por instalação — válido 1h."""
+    try:
+        resp = httpx.post(
+            f"{_GITHUB_API}/app/installations/{installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {_generate_app_jwt()}",
+                "Accept": _ACCEPT,
+                "X-GitHub-Api-Version": _API_VERSION,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["token"]
+    except httpx.HTTPError as exc:
+        raise GitHubClientError(f"Falha ao obter installation token: {exc}") from exc
 
 
 class GitHubClient:
-    def __init__(self) -> None:
-        self._client = httpx.AsyncClient(
-            base_url="https://api.github.com",
+    def __init__(self, token: str | None = None) -> None:
+        tok = token or settings.GITHUB_TOKEN
+        self._client = httpx.Client(
+            base_url=_GITHUB_API,
             headers={
-                "Authorization": f"token {settings.GITHUB_TOKEN}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "Authorization": f"Bearer {tok}",
+                "Accept": _ACCEPT,
+                "X-GitHub-Api-Version": _API_VERSION,
             },
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=30.0,
         )
 
     @staticmethod
-    def verify_webhook_signature(body: bytes, signature_header: str) -> None:
-        """Lança InvalidWebhookSignature se a assinatura HMAC for inválida."""
-        if not signature_header:
-            raise InvalidWebhookSignature("Signature header ausente")
+    def verify_webhook(body: bytes, signature_header: str) -> None:
+        verify_github_signature(body, signature_header, settings.GITHUB_WEBHOOK_SECRET)
 
-        expected = "sha256=" + hmac.new(
-            settings.GITHUB_WEBHOOK_SECRET.encode("utf-8"),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
+    # ── Commit status ──────────────────────────────────────────────────────
 
-        if not hmac.compare_digest(expected, signature_header):
-            raise InvalidWebhookSignature("Assinatura inválida")
-
-    async def create_code_suggestion(
+    def set_commit_status(
         self,
-        owner: str,
-        repo: str,
-        pr_number: int,
+        repo_full_name: str,
         commit_sha: str,
-        file_path: str,
-        line_number: int,
-        suggestion_body: str,
-    ) -> int:
-        """
-        Posta code suggestion como review comment.
-        NUNCA faz auto-apply — apenas entrega a suggestion para aprovação humana.
-        """
-        # DEBT: implementar na Fase 3 com github_client real
-        logger.bind(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            file_path=file_path,
-        ).info("code_suggestion_queued")
-        return 0
-
-    async def set_commit_status(
-        self,
-        owner: str,
-        repo: str,
-        commit_sha: str,
-        state: str,
+        state: Literal["pending", "success", "failure", "error"],
         description: str,
-        context: str = "aperia/security",
+        context: str = "aperIA / security-analysis",
     ) -> None:
         try:
-            response = await self._client.post(
-                f"/repos/{owner}/{repo}/statuses/{commit_sha}",
+            self._client.post(
+                f"/repos/{repo_full_name}/statuses/{commit_sha}",
                 json={
                     "state": state,
                     "description": description[:140],
                     "context": context,
                 },
-            )
-            response.raise_for_status()
+            ).raise_for_status()
         except httpx.HTTPError as exc:
-            raise GitHubClientError(f"Falha ao definir commit status: {exc}") from exc
+            raise GitHubClientError(f"set_commit_status failed: {exc}") from exc
 
-    async def create_pr_comment(
-        self, owner: str, repo: str, pr_number: int, body: str
+    def block_merge(
+        self, repo_full_name: str, commit_sha: str, reason: str
+    ) -> None:
+        self.set_commit_status(
+            repo_full_name,
+            commit_sha,
+            state="failure",
+            description=f"aperIA: {reason}"[:140],
+        )
+        logger.bind(
+            repo_full_name=repo_full_name, commit_sha=commit_sha
+        ).info("merge_blocked", reason=reason)
+
+    # ── PR reviews and comments ───────────────────────────────────────────
+
+    def create_pr_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        body: str,
+        event: Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"],
     ) -> None:
         try:
-            response = await self._client.post(
-                f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
-                json={"body": body},
-            )
-            response.raise_for_status()
+            self._client.post(
+                f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+                json={"body": body, "event": event},
+            ).raise_for_status()
         except httpx.HTTPError as exc:
-            raise GitHubClientError(f"Falha ao criar PR comment: {exc}") from exc
+            raise GitHubClientError(f"create_pr_review failed: {exc}") from exc
+
+    def create_pr_comment(
+        self, repo_full_name: str, pr_number: int, body: str
+    ) -> None:
+        try:
+            self._client.post(
+                f"/repos/{repo_full_name}/issues/{pr_number}/comments",
+                json={"body": body},
+            ).raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GitHubClientError(f"create_pr_comment failed: {exc}") from exc
+
+    def create_inline_suggestion(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        commit_sha: str,
+        file_path: str,
+        line: int,
+        suggestion_code: str,
+        context_message: str = "",
+    ) -> None:
+        """
+        Code suggestion inline — o dev aceita com 1 clique.
+        SEMPRE usar para patches — nunca commit direto.
+        """
+        prefix = f"{context_message}\n\n" if context_message else ""
+        body = f"{prefix}```suggestion\n{suggestion_code}\n```"
+
+        try:
+            self._client.post(
+                f"/repos/{repo_full_name}/pulls/{pr_number}/comments",
+                json={
+                    "body": body,
+                    "commit_id": commit_sha,
+                    "path": file_path,
+                    "line": line,
+                },
+            ).raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GitHubClientError(f"create_inline_suggestion failed: {exc}") from exc
+
+    # ── Repo data ─────────────────────────────────────────────────────────
+
+    def get_changed_files(
+        self, repo_full_name: str, commit_sha: str
+    ) -> list[dict]:
+        """Retorna arquivos modificados com diff para análise SAST."""
+        try:
+            resp = self._client.get(
+                f"/repos/{repo_full_name}/commits/{commit_sha}"
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GitHubClientError(f"get_changed_files failed: {exc}") from exc
+
+        return [
+            {
+                "filename": f["filename"],
+                "status": f["status"],
+                "patch": f.get("patch", ""),
+                "additions": f["additions"],
+                "deletions": f["deletions"],
+            }
+            for f in resp.json().get("files", [])
+            if f["status"] != "removed"
+        ]
+
+    def get_file_content(
+        self, repo_full_name: str, file_path: str, ref: str
+    ) -> str:
+        """Retorna conteúdo decodificado de um arquivo no commit/branch."""
+        import base64
+        try:
+            resp = self._client.get(
+                f"/repos/{repo_full_name}/contents/{file_path}",
+                params={"ref": ref},
+            )
+            resp.raise_for_status()
+            return base64.b64decode(resp.json()["content"]).decode("utf-8")
+        except httpx.HTTPError as exc:
+            raise GitHubClientError(f"get_file_content failed: {exc}") from exc
+        except (KeyError, UnicodeDecodeError):
+            return ""

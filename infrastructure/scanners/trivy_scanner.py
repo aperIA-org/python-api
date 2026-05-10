@@ -1,12 +1,12 @@
 import json
 import subprocess
-from pathlib import Path
+import time
 
 import structlog
 
+from core.exceptions import ScannerError, ScannerTimeoutError
 from domain.finding.entities import Finding
 from domain.finding.value_objects import Severity, CVEId
-from core.exceptions import ScannerError, ScannerTimeoutError
 
 logger = structlog.get_logger()
 
@@ -20,89 +20,108 @@ _SEVERITY_MAP = {
 
 
 class TrivyScanner:
-    TIMEOUT_SECONDS = 180
+    TIMEOUT = 180
 
-    def scan(self, repo_path: str, commit_sha: str, repo_url: str) -> list[Finding]:
-        safe_path = self._validate_repo_path(repo_path)
-        log = logger.bind(commit_sha=commit_sha, repo_url=repo_url)
-        log.info("trivy_scan_started")
-
+    def scan(self, target: str, commit_sha: str, repo_url: str) -> list[Finding]:
+        """target: path de repo, imagem Docker ou arquivo IaC."""
+        start = time.monotonic()
         try:
             result = subprocess.run(
                 [
-                    "trivy", "fs",
+                    "trivy", target,
                     "--format", "json",
                     "--quiet",
-                    str(safe_path),
+                    "--exit-code", "0",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=self.TIMEOUT_SECONDS,
+                timeout=self.TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise ScannerTimeoutError(f"Trivy timeout após {self.TIMEOUT_SECONDS}s")
+            raise ScannerTimeoutError(f"Trivy timeout após {self.TIMEOUT}s")
         except FileNotFoundError:
-            raise ScannerError("trivy não encontrado — instale o CLI")
+            raise ScannerError("trivy não encontrado no PATH")
 
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            log.warning("trivy_parse_error", error=str(exc))
-            return []
+        raw: dict = {}
+        if result.stdout:
+            try:
+                raw = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                logger.warning("trivy_json_parse_error", error=str(exc))
 
         findings: list[Finding] = []
-        for report in data.get("Results", []):
-            target = str(report.get("Target", ""))[:500]
-            for vuln in report.get("Vulnerabilities", []) or []:
-                finding = self._build_finding(vuln, target, commit_sha, repo_url, log)
-                if finding:
-                    findings.append(finding)
+        for result_obj in raw.get("Results", []):
+            for vuln in result_obj.get("Vulnerabilities", []) or []:
+                findings.append(self._vuln_to_finding(vuln, result_obj, commit_sha, repo_url))
+            for misc in result_obj.get("Misconfigurations", []) or []:
+                findings.append(self._misc_to_finding(misc, result_obj, commit_sha, repo_url))
 
-        log.info("trivy_scan_completed", findings_count=len(findings))
+        logger.info(
+            "trivy_scan_done",
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+            findings_count=len(findings),
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
         return findings
 
-    def _validate_repo_path(self, repo_path: str) -> Path:
-        path = Path(repo_path).resolve()
-        if not path.exists() or not path.is_dir():
-            raise ValueError(f"Repo path inválido: {repo_path}")
-        return path
-
-    def _build_finding(
-        self, vuln: dict, target: str, commit_sha: str, repo_url: str, log
-    ) -> Finding | None:
-        # TODO: validar com doc oficial — formato baseado em trivy OSS 0.55+
+    def health_check(self) -> bool:
         try:
-            vuln_id = str(vuln.get("VulnerabilityID", ""))[:50]
-            title = str(vuln.get("Title", vuln_id))[:300]
-            description = str(vuln.get("Description", ""))[:2000]
-            severity_raw = str(vuln.get("Severity", "UNKNOWN")).upper()
-            severity = _SEVERITY_MAP.get(severity_raw, Severity.INFO)
-            pkg_name = str(vuln.get("PkgName", ""))[:200]
-
-            cve = None
-            if vuln_id.startswith("CVE-"):
-                try:
-                    cve = CVEId(vuln_id)
-                except ValueError:
-                    cve = None
-
-            return Finding(
-                source="trivy",
-                severity=severity,
-                title=title or vuln_id,
-                description=description,
-                commit_sha=commit_sha,
-                repo_url=repo_url,
-                file_path=target if target else None,
-                cve_id=cve,
-                asset=pkg_name if pkg_name else None,
-                raw_output={
-                    "vuln_id": vuln_id,
-                    "pkg": pkg_name,
-                    "severity": severity_raw,
-                    "fixed_version": vuln.get("FixedVersion", ""),
-                },
+            result = subprocess.run(
+                ["trivy", "--version"],
+                capture_output=True,
+                timeout=5,
             )
-        except Exception as exc:
-            log.warning("trivy_finding_build_error", error=str(exc))
-            return None
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def _vuln_to_finding(
+        self, vuln: dict, result_obj: dict, commit_sha: str, repo_url: str
+    ) -> Finding:
+        cve_raw = str(vuln.get("VulnerabilityID", ""))
+        cve_id = None
+        if cve_raw.startswith("CVE-"):
+            try:
+                cve_id = CVEId(cve_raw)
+            except ValueError:
+                pass
+
+        return Finding(
+            source="trivy",
+            severity=_SEVERITY_MAP.get(
+                str(vuln.get("Severity", "UNKNOWN")).upper(), Severity.INFO
+            ),
+            title=str(vuln.get("Title") or vuln.get("VulnerabilityID", "unknown"))[:255],
+            description=str(vuln.get("Description", ""))[:2000],
+            cve_id=cve_id,
+            asset=str(result_obj.get("Target", ""))[:500] or None,
+            raw_output={
+                "vuln_id": cve_raw,
+                "pkg": vuln.get("PkgName", ""),
+                "severity": vuln.get("Severity", ""),
+                "fixed_version": vuln.get("FixedVersion", ""),
+            },
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+        )
+
+    def _misc_to_finding(
+        self, misc: dict, result_obj: dict, commit_sha: str, repo_url: str
+    ) -> Finding:
+        return Finding(
+            source="trivy",
+            severity=_SEVERITY_MAP.get(
+                str(misc.get("Severity", "UNKNOWN")).upper(), Severity.INFO
+            ),
+            title=str(misc.get("Title", "IaC Misconfiguration"))[:255],
+            description=str(misc.get("Description", ""))[:2000],
+            file_path=str(result_obj.get("Target", ""))[:500] or None,
+            raw_output={
+                "id": misc.get("ID", ""),
+                "type": misc.get("Type", ""),
+                "resolution": misc.get("Resolution", ""),
+            },
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+        )

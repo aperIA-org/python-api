@@ -27,6 +27,10 @@ structlog==24.4.0
 
 # Security
 python-jose[cryptography]==3.3.0
+PyJWT[crypto]==2.9.0
+
+# OpenVAS / Greenbone
+python-gvm==24.9.0
 
 # GitHub App
 PyGithub==2.4.0

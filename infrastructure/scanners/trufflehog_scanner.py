@@ -1,18 +1,19 @@
 import json
 import subprocess
-from pathlib import Path
+import time
 
 import structlog
 
+from core.security import safe_repo_path
+from core.exceptions import ScannerError, ScannerTimeoutError
 from domain.finding.entities import Finding
 from domain.finding.value_objects import Severity
-from core.exceptions import ScannerError, ScannerTimeoutError, ScannerParseError
 
 logger = structlog.get_logger()
 
 
 class TruffleHogScanner:
-    TIMEOUT_SECONDS = 120
+    TIMEOUT = 120
 
     def scan(
         self,
@@ -22,85 +23,81 @@ class TruffleHogScanner:
         commit_sha: str,
         repo_url: str,
     ) -> list[Finding]:
-        safe_path = self._validate_repo_path(repo_path)
-        log = logger.bind(commit_sha=commit_sha, repo_url=repo_url)
-        log.info("trufflehog_scan_started")
+        path = safe_repo_path(repo_path)
+        start = time.monotonic()
 
         try:
             result = subprocess.run(
                 [
                     "trufflehog", "git",
-                    f"file://{safe_path}",
+                    f"file://{path}",
                     "--since-commit", base_sha,
                     "--branch", head_sha,
+                    "--only-verified",
                     "--json",
                     "--no-update",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=self.TIMEOUT_SECONDS,
+                timeout=self.TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise ScannerTimeoutError(f"TruffleHog timeout após {self.TIMEOUT_SECONDS}s")
+            raise ScannerTimeoutError(f"TruffleHog timeout após {self.TIMEOUT}s")
         except FileNotFoundError:
-            raise ScannerError("trufflehog não encontrado — instale o CLI")
+            raise ScannerError("trufflehog não encontrado no PATH")
 
-        findings = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parsed = self._parse_line(line, commit_sha, repo_url, log)
+        findings: list[Finding] = []
+        for line in result.stdout.strip().splitlines():
+            parsed = self._safe_parse(line)
             if parsed:
-                findings.append(parsed)
+                findings.append(self._to_finding(parsed, commit_sha, repo_url))
 
-        log.info("trufflehog_scan_completed", findings_count=len(findings))
+        logger.info(
+            "trufflehog_scan_done",
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+            findings_count=len(findings),
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
         return findings
 
-    def _validate_repo_path(self, repo_path: str) -> Path:
-        path = Path(repo_path).resolve()
-        if not path.exists():
-            raise ValueError(f"Repo path inválido: {repo_path}")
-        if not path.is_dir():
-            raise ValueError(f"Repo path não é diretório: {repo_path}")
-        return path
-
-    def _parse_line(
-        self, line: str, commit_sha: str, repo_url: str, log
-    ) -> Finding | None:
+    def health_check(self) -> bool:
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            log.warning("trufflehog_parse_error", line=line[:200])
-            return None
-
-        try:
-            detector = str(data.get("DetectorName", "unknown"))[:100]
-            verified = bool(data.get("Verified", False))
-            git_meta = data.get("SourceMetadata", {}).get("Data", {}).get("Git", {})
-            file_path = str(git_meta.get("file", ""))[:500]
-            line_number_raw = git_meta.get("line")
-            line_number = int(line_number_raw) if line_number_raw else None
-
-            severity = Severity.CRITICAL if verified else Severity.HIGH
-
-            return Finding(
-                source="trufflehog",
-                severity=severity,
-                title=f"Secret detected: {detector}",
-                description=f"{'Verified' if verified else 'Unverified'} secret of type {detector}",
-                commit_sha=commit_sha,
-                repo_url=repo_url,
-                file_path=file_path if file_path else None,
-                line_number=line_number,
-                secret_verified=verified,
-                secret_type=detector,
-                raw_output={
-                    "detector": detector,
-                    "verified": verified,
-                    "file": file_path,
-                },
+            result = subprocess.run(
+                ["trufflehog", "--version"],
+                capture_output=True,
+                timeout=5,
             )
-        except Exception as exc:
-            log.warning("trufflehog_finding_build_error", error=str(exc))
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def _safe_parse(self, line: str) -> dict | None:
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("trufflehog_parse_error", line=line[:200])
             return None
+
+    def _to_finding(self, raw: dict, commit_sha: str, repo_url: str) -> Finding:
+        git_meta = raw.get("SourceMetadata", {}).get("Data", {}).get("Git", {})
+        detector = str(raw.get("DetectorName", "unknown"))
+        secret_type = detector.lower().replace(" ", "_")[:100]
+
+        line_raw = git_meta.get("line")
+        return Finding(
+            source="trufflehog",
+            severity=Severity.CRITICAL,
+            title=f"Secret verificado: {detector}",
+            description=(
+                f"Credencial ativa confirmada do tipo {detector}. "
+                "Acesso ao serviço real verificado pelo TruffleHog."
+            ),
+            file_path=str(git_meta.get("file", ""))[:500] or None,
+            line_number=int(line_raw) if line_raw else None,
+            secret_verified=bool(raw.get("Verified", False)),
+            secret_type=secret_type,
+            raw_output=raw,
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+        )

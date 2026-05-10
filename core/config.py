@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str
 
+    # Scan targets opcionais (configurados por repo/ambiente)
+    ZAP_TARGET_URL: str = ""        # vazio = ZAP pulado no pipeline
+    OPENVAS_TARGET_IP: str = ""     # vazio = OpenVAS pulado no pipeline
+    WAZUH_AGENT_ID: str = ""        # vazio = Wazuh pulado no pipeline
+
     # App
     ENV: str = "development"
     LOG_LEVEL: str = "INFO"

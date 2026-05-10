@@ -1,98 +1,108 @@
 import json
 import subprocess
-from pathlib import Path
+import time
 
 import structlog
 
-from domain.finding.entities import Finding
-from domain.finding.value_objects import Severity
+from core.security import safe_repo_path
 from core.exceptions import ScannerError, ScannerTimeoutError
+from domain.finding.entities import Finding
+from domain.finding.value_objects import Severity, CWEId
 
 logger = structlog.get_logger()
 
 _SEVERITY_MAP = {
-    "ERROR": Severity.HIGH,
-    "WARNING": Severity.MEDIUM,
-    "INFO": Severity.LOW,
+    "ERROR": Severity.CRITICAL,
+    "WARNING": Severity.HIGH,
+    "INFO": Severity.MEDIUM,
 }
 
 
 class SemgrepScanner:
-    TIMEOUT_SECONDS = 300
+    TIMEOUT = 300
 
-    def scan(self, repo_path: str, commit_sha: str, repo_url: str) -> list[Finding]:
-        safe_path = self._validate_repo_path(repo_path)
-        log = logger.bind(commit_sha=commit_sha, repo_url=repo_url)
-        log.info("semgrep_scan_started")
+    def scan(
+        self,
+        repo_path: str,
+        files: list[str],
+        commit_sha: str,
+        repo_url: str,
+    ) -> list[Finding]:
+        path = safe_repo_path(repo_path)
+        start = time.monotonic()
 
+        cmd = ["semgrep", "--config=auto", "--json", "--quiet"] + (files or ["."])
         try:
             result = subprocess.run(
-                [
-                    "semgrep", "scan",
-                    "--config", "auto",
-                    "--json",
-                    "--quiet",
-                    str(safe_path),
-                ],
+                cmd,
+                cwd=str(path),
                 capture_output=True,
                 text=True,
-                timeout=self.TIMEOUT_SECONDS,
+                timeout=self.TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            raise ScannerTimeoutError(f"Semgrep timeout após {self.TIMEOUT_SECONDS}s")
+            raise ScannerTimeoutError(f"Semgrep timeout após {self.TIMEOUT}s")
         except FileNotFoundError:
-            raise ScannerError("semgrep não encontrado — instale o CLI")
+            raise ScannerError("semgrep não encontrado no PATH")
 
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            log.warning("semgrep_parse_error", error=str(exc))
-            return []
+        raw: dict = {}
+        if result.stdout:
+            try:
+                raw = json.loads(result.stdout)
+            except json.JSONDecodeError as exc:
+                logger.warning("semgrep_json_parse_error", error=str(exc))
 
-        findings = []
-        for result_item in data.get("results", []):
-            finding = self._build_finding(result_item, commit_sha, repo_url, log)
-            if finding:
-                findings.append(finding)
+        findings = [
+            self._to_finding(r, commit_sha, repo_url)
+            for r in raw.get("results", [])
+        ]
 
-        log.info("semgrep_scan_completed", findings_count=len(findings))
+        logger.info(
+            "semgrep_scan_done",
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+            findings_count=len(findings),
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
         return findings
 
-    def _validate_repo_path(self, repo_path: str) -> Path:
-        path = Path(repo_path).resolve()
-        if not path.exists() or not path.is_dir():
-            raise ValueError(f"Repo path inválido: {repo_path}")
-        return path
-
-    def _build_finding(
-        self, item: dict, commit_sha: str, repo_url: str, log
-    ) -> Finding | None:
-        # TODO: validar com doc oficial — formato baseado em semgrep OSS 1.x
+    def health_check(self) -> bool:
         try:
-            check_id = str(item.get("check_id", "unknown"))[:200]
-            message = str(item.get("extra", {}).get("message", ""))[:1000]
-            severity_raw = str(item.get("extra", {}).get("severity", "INFO")).upper()
-            severity = _SEVERITY_MAP.get(severity_raw, Severity.INFO)
-            file_path = str(item.get("path", ""))[:500]
-            line_number = item.get("start", {}).get("line")
-            cwe_raw = item.get("extra", {}).get("metadata", {}).get("cwe", [])
-            cwe_str = cwe_raw[0] if isinstance(cwe_raw, list) and cwe_raw else None
-
-            return Finding(
-                source="semgrep",
-                severity=severity,
-                title=check_id,
-                description=message,
-                commit_sha=commit_sha,
-                repo_url=repo_url,
-                file_path=file_path if file_path else None,
-                line_number=int(line_number) if line_number else None,
-                raw_output={
-                    "check_id": check_id,
-                    "severity": severity_raw,
-                    "cwe": cwe_str,
-                },
+            result = subprocess.run(
+                ["semgrep", "--version"],
+                capture_output=True,
+                timeout=5,
             )
-        except Exception as exc:
-            log.warning("semgrep_finding_build_error", error=str(exc))
-            return None
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def _to_finding(self, r: dict, commit_sha: str, repo_url: str) -> Finding:
+        extra = r.get("extra", {})
+        metadata = extra.get("metadata", {})
+        cwe_list = metadata.get("cwe", [])
+
+        cwe = None
+        if cwe_list:
+            raw_cwe = str(cwe_list[0])
+            if not raw_cwe.startswith("CWE-"):
+                raw_cwe = f"CWE-{raw_cwe}"
+            try:
+                cwe = CWEId(raw_cwe)
+            except ValueError:
+                cwe = None
+
+        return Finding(
+            source="semgrep",
+            severity=_SEVERITY_MAP.get(
+                str(extra.get("severity", "INFO")).upper(), Severity.INFO
+            ),
+            title=str(r.get("check_id", "unknown"))[:255],
+            description=str(extra.get("message", ""))[:2000],
+            cwe_id=cwe,
+            file_path=str(r.get("path", ""))[:500] or None,
+            line_number=r.get("start", {}).get("line"),
+            raw_output=r,
+            commit_sha=commit_sha,
+            repo_url=repo_url,
+        )

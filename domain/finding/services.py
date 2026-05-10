@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from domain.finding.entities import Finding, RiskScore
+from domain.shared.value_objects import AssetCriticality, BusinessContext
 
 
 class FindingDeduplicator:
@@ -19,6 +22,7 @@ class RiskScorer:
     """
     Score = CVSS(25%) + CTI_active(25%) + Caldera_success(30%) + Business_impact(20%)
     Secret verificado eleva score mínimo a 90.
+    BusinessContext enriquece o componente Business com dados reais do repositório.
     """
 
     _SEVERITY_CVSS: dict[str, float] = {
@@ -29,16 +33,24 @@ class RiskScorer:
         "info":     0.0,
     }
 
+    _CRITICALITY_BASE: dict[AssetCriticality, float] = {
+        AssetCriticality.CRITICAL: 100.0,
+        AssetCriticality.HIGH:     75.0,
+        AssetCriticality.MEDIUM:   50.0,
+        AssetCriticality.LOW:      25.0,
+    }
+
     def calculate(
         self,
         findings: list[Finding],
         cti_data: dict,
         caldera_results: dict,
+        business_ctx: BusinessContext | None = None,
     ) -> RiskScore:
-        cvss = self._cvss_component(findings)
-        cti = self._cti_component(cti_data)
-        caldera = self._caldera_component(caldera_results)
-        business = self._business_component(findings)
+        cvss     = self._cvss_component(findings)
+        cti      = self._cti_component(cti_data)
+        caldera  = self._caldera_component(caldera_results)
+        business = self._business_component(findings, business_ctx)
 
         raw = cvss * 0.25 + cti * 0.25 + caldera * 0.30 + business * 0.20
         has_verified_secret = any(f.is_critical_secret() for f in findings)
@@ -55,25 +67,44 @@ class RiskScorer:
     def _cvss_component(self, findings: list[Finding]) -> float:
         if not findings:
             return 0.0
-        scores = [self._SEVERITY_CVSS.get(f.severity.value, 0.0) for f in findings]
-        return max(scores)
+        return max(self._SEVERITY_CVSS.get(f.severity.value, 0.0) for f in findings)
 
     def _cti_component(self, cti_data: dict) -> float:
         if not cti_data:
             return 0.0
-        active_campaigns = cti_data.get("active_campaigns", 0)
-        return min(active_campaigns * 25.0, 100.0)
+        return min(cti_data.get("active_campaigns", 0) * 25.0, 100.0)
 
     def _caldera_component(self, caldera_results: dict) -> float:
         if not caldera_results:
             return 0.0
-        success_rate = caldera_results.get("success_rate", 0.0)
-        return float(success_rate) * 100.0
+        return float(caldera_results.get("success_rate", 0.0)) * 100.0
 
-    def _business_component(self, findings: list[Finding]) -> float:
-        critical_count = sum(1 for f in findings if f.severity.value == "critical")
-        high_count = sum(1 for f in findings if f.severity.value == "high")
-        return min((critical_count * 30.0) + (high_count * 15.0), 100.0)
+    def _business_component(
+        self,
+        findings: list[Finding],
+        business_ctx: BusinessContext | None,
+    ) -> float:
+        if business_ctx is None:
+            # Fallback: heurística baseada apenas na contagem de severidade
+            critical = sum(1 for f in findings if f.severity.value == "critical")
+            high     = sum(1 for f in findings if f.severity.value == "high")
+            return min((critical * 30.0) + (high * 15.0), 100.0)
+
+        base = self._CRITICALITY_BASE.get(business_ctx.asset_criticality, 50.0)
+
+        # Modificadores aditivos por tipo de dado sensível presente
+        if business_ctx.contains_financial_data:
+            base = min(base + 12.0, 100.0)
+        if business_ctx.contains_health_data:
+            base = min(base + 12.0, 100.0)
+        if business_ctx.contains_pii:
+            base = min(base + 8.0, 100.0)
+        if business_ctx.internet_facing:
+            base = min(base + 5.0, 100.0)
+        if len(business_ctx.compliance_scope) >= 2:
+            base = min(base + 5.0, 100.0)
+
+        return base
 
 
 class AttackPathBuilder:

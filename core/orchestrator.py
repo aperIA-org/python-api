@@ -23,6 +23,8 @@ from application.attack_path.run_emulation_use_case import RunEmulationUseCase
 from application.remediation.generate_patch_use_case import GeneratePatchUseCase
 from application.remediation.suggest_patch_use_case import SuggestPatchUseCase
 from application.report.generate_pr_report_use_case import GeneratePRReportUseCase
+from application.finding.infer_business_context_use_case import InferBusinessContextUseCase
+from domain.shared.value_objects import BusinessContext
 
 logger = structlog.get_logger()
 
@@ -91,6 +93,12 @@ def run_pipeline(
             deduplicated_count=len(normalized),
         )
 
+        # ── 4.5. Business Context Inference ────────────────────────────
+        # repo_path ainda disponível — inferência antes do cleanup
+        business_ctx = _infer_business_context(
+            repo_path, commit_sha, repo_full_name or "", log
+        )
+
         # ── 5. CTI Enrichment — OpenCTI ───────────────────────────────
         cti_data = _run_cti_enrichment(normalized, commit_sha, log)
 
@@ -100,7 +108,9 @@ def run_pipeline(
         )
 
         # ── 7. Risk Scoring ───────────────────────────────────────────
-        risk_score = _risk_scorer.calculate(normalized, cti_data, caldera_results)
+        risk_score = _risk_scorer.calculate(
+            normalized, cti_data, caldera_results, business_ctx
+        )
         log.info(
             "risk_score_calculated",
             score=risk_score.value,
@@ -118,6 +128,7 @@ def run_pipeline(
                 cti_data=cti_data,
                 caldera_results=caldera_results,
                 risk_score=risk_score,
+                business_ctx=business_ctx,
                 github=github,
                 commit_sha=commit_sha,
                 repo_full_name=repo_full_name,
@@ -151,11 +162,36 @@ def run_pipeline(
 # ── Phase 3 helpers ────────────────────────────────────────────────────────
 
 
+def _infer_business_context(
+    repo_path: str,
+    commit_sha: str,
+    repo_full_name: str,
+    log,
+) -> BusinessContext | None:
+    try:
+        ctx = InferBusinessContextUseCase().execute(
+            repo_path=repo_path,
+            commit_sha=commit_sha,
+            repo_full_name=repo_full_name,
+        )
+        log.info(
+            "business_context_inferred",
+            domain=ctx.domain,
+            criticality=ctx.asset_criticality.value,
+            confidence=ctx.inference_confidence,
+        )
+        return ctx
+    except Exception as exc:
+        log.warning("business_context_inference_failed", error=str(exc))
+        return None
+
+
 def _run_heuristic_phase(
     findings: list[Finding],
     cti_data: dict,
     caldera_results: dict,
     risk_score: RiskScore,
+    business_ctx: BusinessContext | None,
     github: GitHubClient,
     commit_sha: str,
     repo_full_name: str,
@@ -166,11 +202,13 @@ def _run_heuristic_phase(
     Etapa 9: análise Claude → code suggestions → PR review.
     Falha de forma silenciosa (log + continue) para não bloquear o pipeline.
     """
-    repo_context = {
+    repo_context: dict = {
         "commit": commit_sha,
         "repo": repo_full_name,
         "pr_number": pr_number,
     }
+    if business_ctx:
+        repo_context["business_context"] = business_ctx.to_dict()
     try:
         analysis = GeneratePatchUseCase().execute(
             findings=findings,

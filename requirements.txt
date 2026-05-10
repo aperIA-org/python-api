@@ -22,6 +22,12 @@ pydantic-settings==2.5.2
 # Claude API
 anthropic==0.34.2
 
+# LLM Guard — proteção contra prompt injection (biblioteca Python, não HTTP API)
+llm-guard==0.3.14
+
+# GraphQL client — OpenCTI
+gql[requests]==3.5.0
+
 # Logging
 structlog==24.4.0
 

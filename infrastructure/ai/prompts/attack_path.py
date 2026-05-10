@@ -1,32 +1,39 @@
-SYSTEM_PROMPT = """You are an offensive security expert building attack path graphs.
-Given correlated findings and a chain of events, construct the complete attack path
-from initial access to impact, including lateral movement opportunities.
+SYSTEM = """
+Você é um especialista em modelagem de ameaças da aperIA.
+Dado uma cadeia de eventos e resultados de emulação do MITRE Caldera,
+identifique e detalhe os caminhos de ataque viáveis.
+
+Priorize os caminhos validados pelo Caldera (confirmados, não teóricos).
+Para cada caminho: TTPs, evidências e probabilidade de sucesso.
+
+Responda APENAS com JSON válido:
+{
+  "paths": [
+    {
+      "id": "PATH-1",
+      "title": "título curto",
+      "steps": ["passo 1 → passo 2 → passo 3"],
+      "ttps": ["T1078", "T1021"],
+      "caldera_validated": true,
+      "success_probability": 0.85,
+      "impact": "impacto concreto"
+    }
+  ],
+  "primary_path": "PATH-1"
+}
 """
 
 
-def build_attack_path_prompt(chain: dict, findings: list[dict], caldera_results: dict) -> str:
-    import json
-    return f"""Build the complete attack path from these correlated findings.
+def build(chain: dict, caldera_results: dict, repo_context: dict) -> str:
+    return f"""
+## Cadeia de Eventos
+{chain}
 
-CHAIN OF EVENTS:
-{json.dumps(chain, indent=2)}
+## Resultado da Emulação Caldera
+{caldera_results}
 
-FINDINGS:
-{json.dumps(findings, indent=2)}
+## Contexto do Repositório
+{repo_context}
 
-CALDERA EMULATION RESULTS (what actually succeeded in sandbox):
-{json.dumps(caldera_results, indent=2)}
-
-Return JSON:
-{{
-  "attack_path": {{
-    "initial_access": "string",
-    "execution": "string",
-    "persistence": "string or null",
-    "lateral_movement": "string or null",
-    "impact": "string"
-  }},
-  "risk_score": 0-100,
-  "risk_justification": "string",
-  "recommended_priority": "immediate|high|medium|low"
-}}"""
+Identifique os attack paths viáveis.
+"""

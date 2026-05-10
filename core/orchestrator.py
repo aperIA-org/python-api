@@ -1,14 +1,15 @@
+import os
+import shutil
 import subprocess
 import tempfile
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import structlog
 
 from core.config import settings
 from core.exceptions import ScannerError
-from domain.finding.entities import Finding
-from domain.finding.services import FindingDeduplicator
+from domain.finding.entities import Finding, RiskScore
+from domain.finding.services import FindingDeduplicator, RiskScorer
 from infrastructure.scanners.trufflehog_scanner import TruffleHogScanner
 from infrastructure.scanners.semgrep_scanner import SemgrepScanner
 from infrastructure.scanners.trivy_scanner import TrivyScanner
@@ -17,10 +18,13 @@ from infrastructure.scanners.openvas_scanner import OpenVASScanner
 from infrastructure.scanners.wazuh_scanner import WazuhScanner
 from infrastructure.scanners.prowler_scanner import ProwlerScanner
 from infrastructure.git.github_client import GitHubClient, get_installation_token
+from application.finding.enrich_findings_use_case import EnrichFindingsUseCase
+from application.attack_path.run_emulation_use_case import RunEmulationUseCase
 
 logger = structlog.get_logger()
 
 _deduplicator = FindingDeduplicator()
+_risk_scorer = RiskScorer()
 
 
 def run_pipeline(
@@ -78,12 +82,38 @@ def run_pipeline(
         # ── 4. Normalize + Deduplicate ─────────────────────────────────
         all_findings = th_findings + parallel_findings
         normalized = _deduplicator.deduplicate(all_findings)
+        log.info(
+            "deduplication_done",
+            raw_count=len(all_findings),
+            deduplicated_count=len(normalized),
+        )
+
+        # ── 5. CTI Enrichment — OpenCTI ───────────────────────────────
+        cti_data = _run_cti_enrichment(normalized, commit_sha, log)
+
+        # ── 6. Caldera Emulation — sandbox only ───────────────────────
+        caldera_results = _run_caldera_emulation(
+            cti_data, commit_sha, bool(verified_secrets), log
+        )
+
+        # ── 7. Risk Scoring ───────────────────────────────────────────
+        risk_score = _risk_scorer.calculate(normalized, cti_data, caldera_results)
+        log.info(
+            "risk_score_calculated",
+            score=risk_score.value,
+            level=risk_score.level,
+        )
+
+        # ── 8. Update commit status based on risk ─────────────────────
+        if github and repo_full_name:
+            _set_final_status(github, repo_full_name, commit_sha, risk_score, log)
 
         log.info(
             "pipeline_completed",
             raw_count=len(all_findings),
             deduplicated_count=len(normalized),
             verified_secrets=len(verified_secrets),
+            risk_score=risk_score.value,
         )
         return normalized
 
@@ -101,7 +131,68 @@ def run_pipeline(
             _cleanup_repo(repo_path)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ── Phase 2 helpers ────────────────────────────────────────────────────────
+
+
+def _run_cti_enrichment(
+    findings: list[Finding],
+    commit_sha: str,
+    log,
+) -> dict:
+    try:
+        use_case = EnrichFindingsUseCase()
+        return use_case.execute(findings, commit_sha)
+    except Exception as exc:
+        log.warning("cti_enrichment_failed", error=str(exc))
+        return {"per_cve": {}, "active_campaigns": 0, "techniques": []}
+
+
+def _run_caldera_emulation(
+    cti_data: dict,
+    commit_sha: str,
+    has_verified_secrets: bool,
+    log,
+) -> dict:
+    try:
+        use_case = RunEmulationUseCase()
+        return use_case.execute(
+            cti_data=cti_data,
+            commit_sha=commit_sha,
+            has_verified_secrets=has_verified_secrets,
+        )
+    except Exception as exc:
+        log.warning("caldera_emulation_failed", error=str(exc))
+        return {
+            "techniques_executed": 0,
+            "techniques_successful": 0,
+            "success_rate": 0.0,
+            "ttps_used": [],
+            "caldera_validated": False,
+        }
+
+
+def _set_final_status(
+    github: GitHubClient,
+    repo_full_name: str,
+    commit_sha: str,
+    risk_score: RiskScore,
+    log,
+) -> None:
+    if risk_score.level in ("critical", "high"):
+        state = "failure"
+        desc = f"aperIA: {risk_score.level.upper()} risk (score {risk_score.value}/100) — merge blocked"
+    elif risk_score.level == "medium":
+        state = "failure"
+        desc = f"aperIA: MEDIUM risk (score {risk_score.value}/100) — review required"
+    else:
+        state = "success"
+        desc = f"aperIA: {risk_score.level.upper()} risk (score {risk_score.value}/100) — OK"
+
+    github.set_commit_status(repo_full_name, commit_sha, state, desc)
+    log.info("commit_status_set", state=state, risk_level=risk_score.level)
+
+
+# ── Phase 1 helpers ────────────────────────────────────────────────────────
 
 
 def _build_github_client(installation_id: int | None) -> GitHubClient | None:
@@ -117,12 +208,10 @@ def _build_github_client(installation_id: int | None) -> GitHubClient | None:
 
 
 def _clone_repo(repo_url: str, commit_sha: str, installation_id: int | None) -> str:
-    """Clona o repositório em diretório temporário e faz checkout do commit."""
     tmp = tempfile.mkdtemp(prefix="aperia-scan-")
 
     clone_url = repo_url
     if installation_id and settings.GITHUB_TOKEN:
-        # Injeta token na URL para autenticação — nunca loga a URL completa
         clone_url = repo_url.replace(
             "https://github.com",
             f"https://x-access-token:{settings.GITHUB_TOKEN}@github.com",
@@ -156,7 +245,6 @@ def _clone_repo(repo_url: str, commit_sha: str, installation_id: int | None) -> 
 
 
 def _get_parent_sha(repo_path: str, commit_sha: str) -> str:
-    """Retorna o SHA do commit pai para o TruffleHog --since-commit."""
     result = subprocess.run(
         ["git", "rev-parse", f"{commit_sha}^"],
         cwd=repo_path,
@@ -167,7 +255,7 @@ def _get_parent_sha(repo_path: str, commit_sha: str) -> str:
     parent = result.stdout.strip()
     if len(parent) == 40:
         return parent
-    return commit_sha  # root commit — usa o próprio
+    return commit_sha
 
 
 def _run_trufflehog(
@@ -191,7 +279,6 @@ def _run_parallel_scanners(
     repo_url: str,
     log,
 ) -> list[Finding]:
-    """Executa Semgrep, Trivy, ZAP, OpenVAS, Wazuh, Prowler em paralelo."""
     tasks: dict[str, callable] = {
         "semgrep":  lambda: SemgrepScanner().scan(repo_path, ["."], commit_sha, repo_url),
         "trivy":    lambda: TrivyScanner().scan(repo_path, commit_sha, repo_url),
@@ -238,7 +325,6 @@ def _run_wazuh_if_enabled(commit_sha: str, repo_url: str) -> list[Finding]:
 
 
 def _cleanup_repo(repo_path: str) -> None:
-    import shutil
     try:
         shutil.rmtree(repo_path, ignore_errors=True)
     except Exception as exc:

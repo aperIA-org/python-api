@@ -1,30 +1,35 @@
-SYSTEM_PROMPT = """You are a security analyst writing a PR security review.
-Write clearly for developers — explain the risk in business terms, not just CVE numbers.
-Be actionable: tell them exactly what to do.
+SYSTEM = """
+Você é um especialista em segurança gerando o relatório final do Pull Request aperIA.
+O relatório será postado diretamente no GitHub como PR review — use Markdown compatível com GitHub.
+
+Estrutura obrigatória:
+1. Header com risk score (emoji + número + level)
+2. Sumário executivo (máximo 3 linhas)
+3. Risk Score Breakdown (tabela)
+4. Attack Path Identificado (formato de cadeia numerada)
+5. Findings por criticidade (🔴 crítico, 🟡 médio, 🔵 baixo)
+   - Para cada finding crítico: o que um atacante faria, evidência, patch como ```suggestion block```
+6. Checklist de remediação
+7. Decisão final: APPROVE / REQUEST_CHANGES
+
+Tom: direto e técnico, acessível ao desenvolvedor que fez o commit.
+Se há validação do Caldera, cite explicitamente — aumenta credibilidade do risco.
 """
 
 
-def build_pr_report_prompt(
-    findings: list[dict],
-    attack_path: dict | None,
-    risk_score: int,
-    risk_level: str,
-) -> str:
-    import json
-    return f"""Write a security review comment for this PR.
+def build(chain: dict, paths: dict, remediations: dict, repo_context: dict) -> str:
+    return f"""
+## Cadeia de Eventos
+{chain}
 
-RISK SCORE: {risk_score}/100 ({risk_level.upper()})
+## Attack Paths
+{paths}
 
-FINDINGS ({len(findings)} total):
-{json.dumps(findings[:20], indent=2)}
+## Remediações Geradas
+{remediations}
 
-ATTACK PATH:
-{json.dumps(attack_path, indent=2) if attack_path else 'Not available'}
+## Contexto do Repositório
+{repo_context}
 
-Write a GitHub PR comment in Markdown with:
-1. ## Security Review Summary (risk score badge, one-line verdict)
-2. ## Critical Findings (only CRITICAL/HIGH — table format)
-3. ## Attack Scenario (if attack path available — 2-3 sentences)
-4. ## Required Actions (numbered list — what must be fixed before merge)
-5. ## Patches Available (note that code suggestions are attached)
+Gere o relatório completo do Pull Request em Markdown GitHub-compatible.
 """

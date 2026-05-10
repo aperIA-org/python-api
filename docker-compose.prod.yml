@@ -1,0 +1,97 @@
+version: "3.9"
+
+# docker-compose.prod.yml — para deploy via Coolify (Oracle Cloud / Hetzner)
+# PostgreSQL: use Neon.tech (DATABASE_URL via env) — não rodar Postgres local em prod
+# Redis: Upstash free tier (REDIS_URL via env) ou container local
+
+networks:
+  aperia_internal:
+    driver: bridge
+  caldera_sandbox:
+    driver: bridge
+    internal: true
+
+volumes:
+  redis_data:
+  caldera_data:
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn presentation.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    env_file: .env
+    ports:
+      - "8000:8000"
+    networks:
+      - aperia_internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  worker_scan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q scan -c 2 --loglevel=info
+    env_file: .env
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  worker_analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q analysis -c 2 --loglevel=info
+    env_file: .env
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  worker_remediation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q remediation -c 1 --loglevel=info
+    env_file: .env
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - aperia_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # LLM Guard — obrigatório antes do Claude
+  llm_guard:
+    image: ghcr.io/protectai/llm-guard-api:latest
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  # Caldera — ISOLADO, sandbox only
+  caldera:
+    image: mitre/caldera:latest
+    environment:
+      - CALDERA_API_KEY=${CALDERA_API_KEY}
+    volumes:
+      - caldera_data:/usr/src/app/data
+    networks:
+      - caldera_sandbox
+    restart: unless-stopped

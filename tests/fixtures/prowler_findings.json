@@ -1,0 +1,1 @@
+{"CheckID":"iam_root_credentials_are_not_used","CheckTitle":"Ensure root credentials are not used","Status":"FAIL","Severity":"critical","ServiceName":"iam","Region":"us-east-1","ResourceId":"arn:aws:iam::123456789012:root","Description":"Root account credentials were used in the last 90 days."}

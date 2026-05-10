@@ -1,0 +1,14 @@
+{
+  "data": {
+    "affected_items": [
+      {
+        "cve": "CVE-2023-44487",
+        "name": "libnghttp2",
+        "version": "1.51.0-1",
+        "severity": "HIGH",
+        "description": "HTTP/2 Rapid Reset Attack vulnerability"
+      }
+    ],
+    "total_affected_items": 1
+  }
+}

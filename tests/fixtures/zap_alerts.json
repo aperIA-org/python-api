@@ -1,0 +1,13 @@
+{
+  "alerts": [
+    {
+      "alertRef": "10202",
+      "name": "Absence of Anti-CSRF Tokens",
+      "riskcode": "2",
+      "confidence": "2",
+      "description": "No Anti-CSRF tokens were found in the HTML form.",
+      "url": "http://target/login",
+      "solution": "Use a vetted library or framework that provides CSRF protection."
+    }
+  ]
+}

@@ -1,21 +1,181 @@
+version: "3.9"
+
+networks:
+  aperia_internal:
+    driver: bridge
+  caldera_sandbox:
+    driver: bridge
+    internal: true  # sem acesso à internet — isolamento total
+
+volumes:
+  postgres_data:
+  redis_data:
+  grafana_data:
+  prometheus_data:
+  caldera_data:
+
 services:
+  # ── Infraestrutura base ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: aperia
+      POSTGRES_USER: aperia
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aperia_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aperia"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass-file /run/secrets/redis_password
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+    networks:
+      - aperia_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Aplicação aperIA ─────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: python-api
-    env_file:
-      - .env
+    command: uvicorn presentation.api.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
-      - app_net
+      - aperia_internal
+    restart: unless-stopped
 
-networks:
-  app_net:
-    driver: bridge
-    enable_ipv6: true
-    ipam:
-      config:
-        - subnet: "172.30.0.0/16"
-        - subnet: "fd00:dead:beef::/64"
+  worker_scan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q scan -c 2 --loglevel=info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  worker_analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q analysis -c 2 --loglevel=info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  worker_remediation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A core.celery_app.celery_app worker -Q remediation -c 1 --loglevel=info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  # ── Ferramentas de segurança ──────────────────────────────────────────────
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=false
+    environment:
+      - ZAP_API_KEY=${ZAP_API_KEY}
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  llm_guard:
+    image: ghcr.io/protectai/llm-guard-api:latest
+    ports:
+      - "8010:8010"
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  # ── Caldera — ISOLADO em rede sandbox ────────────────────────────────────
+  # REGRA: caldera nunca tem acesso à rede aperia_internal
+  caldera:
+    image: mitre/caldera:latest
+    environment:
+      - CALDERA_API_KEY=${CALDERA_API_KEY}
+    volumes:
+      - caldera_data:/usr/src/app/data
+    networks:
+      - caldera_sandbox  # apenas sandbox — sem acesso à rede principal
+    restart: unless-stopped
+    # DEBT: adicionar resource limits (mem/cpu) para conter emulação maliciosa
+
+  # ── Observabilidade ───────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - aperia_internal
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+    secrets:
+      - grafana_password
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - aperia_internal
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  grafana_password:
+    file: ./secrets/grafana_password.txt

@@ -20,6 +20,9 @@ from infrastructure.scanners.prowler_scanner import ProwlerScanner
 from infrastructure.git.github_client import GitHubClient, get_installation_token
 from application.finding.enrich_findings_use_case import EnrichFindingsUseCase
 from application.attack_path.run_emulation_use_case import RunEmulationUseCase
+from application.remediation.generate_patch_use_case import GeneratePatchUseCase
+from application.remediation.suggest_patch_use_case import SuggestPatchUseCase
+from application.report.generate_pr_report_use_case import GeneratePRReportUseCase
 
 logger = structlog.get_logger()
 
@@ -108,6 +111,20 @@ def run_pipeline(
         if github and repo_full_name:
             _set_final_status(github, repo_full_name, commit_sha, risk_score, log)
 
+        # ── 9. Claude heuristic analysis + code suggestions + PR review ──
+        if pr_number and github and repo_full_name:
+            _run_heuristic_phase(
+                findings=normalized,
+                cti_data=cti_data,
+                caldera_results=caldera_results,
+                risk_score=risk_score,
+                github=github,
+                commit_sha=commit_sha,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                log=log,
+            )
+
         log.info(
             "pipeline_completed",
             raw_count=len(all_findings),
@@ -129,6 +146,64 @@ def run_pipeline(
     finally:
         if repo_path and os.path.exists(repo_path):
             _cleanup_repo(repo_path)
+
+
+# ── Phase 3 helpers ────────────────────────────────────────────────────────
+
+
+def _run_heuristic_phase(
+    findings: list[Finding],
+    cti_data: dict,
+    caldera_results: dict,
+    risk_score: RiskScore,
+    github: GitHubClient,
+    commit_sha: str,
+    repo_full_name: str,
+    pr_number: int,
+    log,
+) -> None:
+    """
+    Etapa 9: análise Claude → code suggestions → PR review.
+    Falha de forma silenciosa (log + continue) para não bloquear o pipeline.
+    """
+    repo_context = {
+        "commit": commit_sha,
+        "repo": repo_full_name,
+        "pr_number": pr_number,
+    }
+    try:
+        analysis = GeneratePatchUseCase().execute(
+            findings=findings,
+            cti_data=cti_data,
+            caldera_results=caldera_results,
+            repo_context=repo_context,
+        )
+    except Exception as exc:
+        log.error("heuristic_analysis_failed", error=str(exc), exc_info=True)
+        return
+
+    try:
+        posted = SuggestPatchUseCase(github).execute(
+            remediations=analysis.get("remediations", []),
+            findings=findings,
+            repo_full_name=repo_full_name,
+            commit_sha=commit_sha,
+            pr_number=pr_number,
+        )
+        log.info("code_suggestions_posted", count=posted)
+    except Exception as exc:
+        log.error("suggest_patch_failed", error=str(exc), exc_info=True)
+
+    try:
+        GeneratePRReportUseCase(github).execute(
+            analysis=analysis,
+            risk_score=risk_score,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            commit_sha=commit_sha,
+        )
+    except Exception as exc:
+        log.error("pr_report_failed", error=str(exc), exc_info=True)
 
 
 # ── Phase 2 helpers ────────────────────────────────────────────────────────

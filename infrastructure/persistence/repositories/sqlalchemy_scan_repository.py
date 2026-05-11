@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from domain.scan.entities import ScanJob, ScanStatus
 from domain.scan.repositories import ScanJobRepository
@@ -46,5 +46,13 @@ class SQLAlchemyScanRepository(ScanJobRepository):
     async def get_running_scans(self) -> list[ScanJob]:
         result = await self.db.execute(
             select(ScanJobModel).where(ScanJobModel.status == ScanStatus.RUNNING.value)
+        )
+        return [m.to_entity() for m in result.scalars().all()]
+
+    async def list_recent(self, limit: int = 20) -> list[ScanJob]:
+        result = await self.db.execute(
+            select(ScanJobModel)
+            .order_by(desc(ScanJobModel.created_at))
+            .limit(limit)
         )
         return [m.to_entity() for m in result.scalars().all()]

@@ -20,6 +20,9 @@ class ScanJobRepository(ABC):
     @abstractmethod
     async def get_running_scans(self) -> list[ScanJob]: ...
 
+    @abstractmethod
+    async def list_recent(self, limit: int = 20) -> list[ScanJob]: ...
+
 
 class ScanResultRepository(ABC):
     @abstractmethod

@@ -17,6 +17,7 @@
    - [Fase 2 — Inteligência de ameaças e risk scoring](#fase-2--inteligência-de-ameaças-e-risk-scoring)
    - [Fase 3 — Análise Claude e code suggestions](#fase-3--análise-claude-e-code-suggestions)
    - [Business Context Inferrer](#business-context-inferrer)
+   - [Fase 4 — API REST, persistência e workers](#fase-4--api-rest-persistência-e-workers)
 6. [Risk Score — fórmula e componentes](#6-risk-score--fórmula-e-componentes)
 7. [Regra de remediação inviolável](#7-regra-de-remediação-inviolável)
 8. [Variáveis de ambiente](#8-variáveis-de-ambiente)
@@ -358,6 +359,74 @@ inferrer.infer_without_llm(repo_path)
 1. `RiskScorer._business_component()` — score de negócio calibrado com dados reais
 2. `repo_context["business_context"]` — incluso nos prompts do Claude (custo BRL, compliance)
 
+### Fase 4 — API REST, persistência e workers
+
+Camada `presentation/` completa com persistência no PostgreSQL via Alembic.
+
+#### Endpoints disponíveis
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/webhook/github` | Recebe push/PR do GitHub, valida HMAC, enfileira scan |
+| `GET` | `/scans/` | Lista os 20 scans mais recentes |
+| `GET` | `/scans/{scan_id}` | Status de um scan por UUID |
+| `GET` | `/scans/commit/{sha}` | Status de um scan por commit SHA |
+| `GET` | `/findings/commit/{sha}` | Todos os findings de um commit |
+| `GET` | `/findings/commit/{sha}/secrets` | Apenas secrets verificados |
+| `GET` | `/findings/{finding_id}` | Finding individual por UUID |
+| `GET` | `/reports/commit/{sha}` | Relatório completo: scan + findings + severidade breakdown |
+| `GET` | `/reports/scan/{scan_id}` | Mesmo relatório, por scan ID |
+| `GET` | `/health` | Health check |
+
+#### ScanJob lifecycle (persistência)
+
+```
+scan_worker.run_scan()
+    │
+    ├─ ScanJob.PENDING  → save_scan_job()
+    ├─ ScanJob.RUNNING  → update_scan_job()
+    ├─ run_pipeline()   → PipelineResult(findings, risk_score, business_ctx)
+    ├─ ScanJob.COMPLETED → update_scan_job()
+    └─ bulk_save_findings()  # todos os findings no banco
+```
+
+#### Workers
+
+| Worker | Celery queue | Função |
+|---|---|---|
+| `scan_worker.run_scan` | `scan` | Pipeline completo + persistência ScanJob + findings |
+| `analysis_worker.run_analysis` | `analysis` | Re-enriquecimento CTI + recálculo risk score para scan existente |
+| `remediation_worker.run_remediation` | `remediation` | Re-geração de patches + PR report para scan existente com PR |
+
+`analysis_worker` e `remediation_worker` são usados para **re-execução** sem re-clonar o repo — útil quando novos dados CTI chegam ou quando o report inicial falhou.
+
+#### Migrations Alembic
+
+```bash
+# Criar tabelas (primeira vez)
+DATABASE_URL=postgresql+asyncpg://... alembic upgrade head
+
+# Nova migration após mudança de modelo
+alembic revision --autogenerate -m "descricao"
+alembic upgrade head
+
+# Rollback
+alembic downgrade -1
+```
+
+A migration `0001_initial_tables.py` cria as tabelas `scan_jobs` e `findings` com todos os índices necessários.
+
+#### `db_utils.py` — bridge async/sync
+
+Celery workers são síncronos. Os repositórios SQLAlchemy são async. O módulo `infrastructure/persistence/db_utils.py` resolve isso com `asyncio.run()`:
+
+```python
+# Em qualquer Celery worker:
+save_scan_job(scan_job)           # sync — internamente usa asyncio.run()
+bulk_save_findings(findings)      # sync
+job = load_scan_job(scan_job_id)  # sync → ScanJob
+```
+
 ---
 
 ## 6. Risk Score — fórmula e componentes
@@ -601,6 +670,7 @@ pytest tests/unit/test_repo_signals.py -v
 | Unit | `test_business_context_inferrer.py` | Fallback heurístico, conversão Claude response, RiskScorer com ctx |
 | Integration | `test_opencti_client.py` | enrich_cve (encontrado/não encontrado), get_active_campaigns |
 | Integration | `test_caldera_client.py` | Sandbox enforcement, parse_results, ciclo completo (respx) |
+| Integration | `test_scan_persistence.py` | ScanJob lifecycle, db_utils wrappers, scan_worker com persistência |
 
 ---
 
@@ -651,7 +721,8 @@ aperia/
 │   │   └── github_client.py       # JWT RS256, installation token, code suggestions
 │   └── persistence/
 │       ├── models/                # SQLAlchemy ORM: finding_model, scan_model
-│       └── repositories/          # Implementações: sqlalchemy_finding_repository
+│       ├── repositories/          # Implementações: sqlalchemy_finding_repository, sqlalchemy_scan_repository
+│       └── db_utils.py            # Bridge async→sync para Celery workers
 │
 ├── presentation/
 │   ├── api/                       # FastAPI: webhooks, findings, scans, reports, health
@@ -698,6 +769,7 @@ A aperIA analisa repositórios de terceiros mas também precisa ser segura. Regr
 | `92c3795` | Fase 2 | LLM Guard (biblioteca), Claude Client sync, OpenCTI GraphQL, Caldera lifecycle, HeuristicEngine, risk scoring |
 | `5b26cf8` | Fase 3 | Code suggestions inline, PR review, block merge, 17 testes |
 | `9069e6f` | BCI | Business Context Inferrer: extração de sinais, fallback heurístico, RiskScorer atualizado, 34 testes |
+| `(fase-4)` | Fase 4 | API REST completa, Alembic migrations, ScanJob persistence, 3 workers, 9 endpoints, 14 testes integração |
 
 ---
 

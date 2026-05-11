@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import structlog
 
@@ -32,6 +33,13 @@ _deduplicator = FindingDeduplicator()
 _risk_scorer = RiskScorer()
 
 
+@dataclass
+class PipelineResult:
+    findings: list[Finding]
+    risk_score: RiskScore
+    business_ctx: BusinessContext | None = None
+
+
 def run_pipeline(
     commit_sha: str,
     repo_url: str,
@@ -39,7 +47,7 @@ def run_pipeline(
     installation_id: int | None = None,
     base_sha: str | None = None,
     repo_full_name: str | None = None,
-) -> list[Finding]:
+) -> PipelineResult:
     log = logger.bind(
         commit_sha=commit_sha,
         repo_url=repo_url,
@@ -143,7 +151,11 @@ def run_pipeline(
             verified_secrets=len(verified_secrets),
             risk_score=risk_score.value,
         )
-        return normalized
+        return PipelineResult(
+            findings=normalized,
+            risk_score=risk_score,
+            business_ctx=business_ctx,
+        )
 
     except Exception as exc:
         log.error("pipeline_failed", error=str(exc), exc_info=True)
@@ -392,7 +404,7 @@ def _run_parallel_scanners(
     repo_url: str,
     log,
 ) -> list[Finding]:
-    tasks: dict[str, callable] = {
+    tasks: dict[str, object] = {
         "semgrep":  lambda: SemgrepScanner().scan(repo_path, ["."], commit_sha, repo_url),
         "trivy":    lambda: TrivyScanner().scan(repo_path, commit_sha, repo_url),
         "zap":      lambda: _run_zap_if_enabled(commit_sha, repo_url),

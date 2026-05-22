@@ -1,0 +1,48 @@
+# aperIA — observabilidade (Prometheus + Grafana)
+#
+# Dashboards:
+#   ▸ aperia-overview: custo Claude em USD, latência por tier,
+#     findings count, requisições à Claude API
+#   ▸ aperia-cost-breakdown: tokens por modelo, hit-rate do
+#     prompt cache
+#
+# Métricas expostas pela aperIA em /metrics (FastAPI endpoint).
+# O Prometheus faz scrape do serviço ``api`` na porta 8000.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: aperia-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - aperia_prom_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - aperia_net
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: aperia-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - aperia_grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - aperia_net
+
+volumes:
+  aperia_prom_data:
+  aperia_grafana_data:

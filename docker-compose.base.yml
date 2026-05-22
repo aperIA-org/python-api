@@ -1,0 +1,160 @@
+# aperIA — composição base
+#
+# Serviços essenciais para o pipeline funcionar:
+# - api: FastAPI + webhook + endpoints REST
+# - worker_tier1 / worker_tier2 / worker_tier3 / worker_analysis / worker_reporting:
+#   filas Celery dedicadas (separação por tier evita backpressure).
+#   Tier 3 roda com concurrency=1 — operações Caldera são pesadas
+#   e síncronas.
+# - redis: broker + result backend
+# - db: Postgres 15 com asyncpg
+#
+# Usar em conjunto:
+#   docker compose -f docker-compose.base.yml up -d
+#   docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml up -d
+#   docker compose -f docker-compose.base.yml -f docker-compose.observability.yml up -d
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aperia-api
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - aperia_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  worker_tier1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app worker -Q tier1 -c 4 --loglevel=info
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_net
+
+  worker_tier2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app worker -Q tier2 -c 2 --loglevel=info
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_net
+
+  worker_tier3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # concurrency=1: Caldera + ZAP são pesados e geralmente
+    # singleton por commit. Rodar em paralelo só faria sentido se
+    # houvessem múltiplos targets de DAST.
+    command: celery -A app.core.celery_app worker -Q tier3 -c 1 --loglevel=info
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+      CALDERA_SANDBOX_MODE: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_net
+
+  worker_analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app worker -Q analysis -c 2 --loglevel=info
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_net
+
+  worker_reporting:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app worker -Q reporting -c 2 --loglevel=info
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aperia
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - aperia_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: aperia-redis
+    networks:
+      - aperia_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: postgres:15-alpine
+    container_name: aperia-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aperia
+    volumes:
+      - aperia_db_data:/var/lib/postgresql/data
+    networks:
+      - aperia_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aperia"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  aperia_net:
+    driver: bridge
+
+volumes:
+  aperia_db_data:

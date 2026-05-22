@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Local SQLite databases used for Alembic dev/tests
+*.db
+*.sqlite
+*.sqlite3
+
 # C extensions
 *.so
 

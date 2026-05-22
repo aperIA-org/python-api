@@ -1,0 +1,3 @@
+{"CheckID":"iam_root_mfa_enabled","CheckTitle":"Ensure MFA is enabled for the root user","Status":"FAIL","Severity":"high","ResourceId":"arn:aws:iam::123456789012:root","ResourceType":"AwsIamUser","StatusExtended":"Root user does not have MFA enabled"}
+{"CheckID":"s3_bucket_public_access","CheckTitle":"S3 bucket should not be public","Status":"FAIL","Severity":"critical","ResourceId":"arn:aws:s3:::my-public-bucket","StatusExtended":"Bucket allows public read access"}
+{"CheckID":"ec2_instance_managed_by_ssm","CheckTitle":"EC2 instance managed by SSM","Status":"PASS","Severity":"medium","ResourceId":"i-0abc123"}

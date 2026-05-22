@@ -1,0 +1,22 @@
+{
+  "version": "1.85.0",
+  "results": [
+    {
+      "check_id": "javascript.express.security.audit.express-cve-2021-44228.express-cve",
+      "path": "src/server/middleware/log.js",
+      "start": {"line": 23, "col": 1},
+      "end": {"line": 23, "col": 50},
+      "extra": {
+        "message": "Log4Shell-like vulnerability in dependency.",
+        "severity": "ERROR",
+        "metadata": {
+          "cve": "CVE-2021-44228",
+          "cwe": "CWE-94: Code Injection",
+          "owasp": "A1: Injection"
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {"scanned": ["src/"]}
+}

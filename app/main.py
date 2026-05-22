@@ -8,6 +8,7 @@ from app.infrastructure.database.sqlalchemy import engine
 from app.presentation.api.routes.auth_routes import router as auth_router
 from app.presentation.api.routes.health_routes import router as health_router
 from app.presentation.api.routes.user_routes import router as user_router
+from app.presentation.api.routes.webhook_routes import router as webhook_router
 
 app = FastAPI(title="Python API")
 
@@ -28,3 +29,4 @@ def init_database() -> None:
 app.include_router(health_router)
 app.include_router(user_router)
 app.include_router(auth_router)
+app.include_router(webhook_router, prefix="/webhook")

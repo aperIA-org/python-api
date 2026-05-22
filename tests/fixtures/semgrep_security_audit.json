@@ -1,0 +1,47 @@
+{
+  "version": "1.85.0",
+  "results": [
+    {
+      "check_id": "python.lang.security.audit.sql-injection.formatted-sql-query",
+      "path": "app/db.py",
+      "start": {"line": 42, "col": 4},
+      "end": {"line": 42, "col": 80},
+      "extra": {
+        "message": "Detected a formatted SQL query. Use parameterized queries instead.",
+        "severity": "ERROR",
+        "metadata": {
+          "cwe": "CWE-89: SQL Injection",
+          "owasp": "A1: Injection",
+          "category": "security"
+        },
+        "lines": "    query = f\"SELECT * FROM users WHERE id = {user_id}\""
+      }
+    },
+    {
+      "check_id": "python.lang.security.audit.dangerous-subprocess-use.dangerous-subprocess-use",
+      "path": "app/runner.py",
+      "start": {"line": 15, "col": 8},
+      "end": {"line": 15, "col": 50},
+      "extra": {
+        "message": "subprocess call with shell=True is dangerous.",
+        "severity": "WARNING",
+        "metadata": {
+          "cwe": "CWE-78: OS Command Injection"
+        }
+      }
+    },
+    {
+      "check_id": "python.lang.best-practice.print-statement.print-statement",
+      "path": "app/util.py",
+      "start": {"line": 5, "col": 1},
+      "end": {"line": 5, "col": 30},
+      "extra": {
+        "message": "Avoid print() in production code.",
+        "severity": "INFO",
+        "metadata": {}
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {"scanned": ["app/db.py", "app/runner.py", "app/util.py"]}
+}

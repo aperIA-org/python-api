@@ -190,6 +190,14 @@ group(run_trufflehog, run_semgrep_changed)         [tier1]
 > "bridge" checa `if not input` e devolve `None`, encerrando o restante sem
 > efeitos colaterais.
 
+> **Persistência de findings (novo):** cada scan worker grava seus findings na
+> tabela `findings` **antes** de devolver os dicts para o canvas — T1 (após cada
+> scanner), T2 (após o dedup) e T3 (findings do ZAP). É um **side-effect
+> best-effort**: roda fora do caminho crítico, e uma falha de banco é apenas
+> logada (`finding_persistence_failed`) sem interromper o pipeline. Os gates e o
+> Claude continuam operando sobre os dicts do canvas, **não** sobre o banco.
+> Detalhes em "Persistência de findings" abaixo.
+
 ---
 
 ### Como os outputs viram score e relatório
@@ -485,6 +493,42 @@ Rank: `critical(4) > high(3) > medium(2) > low(1) > info(0)`.
 
 ---
 
+### Persistência de findings (tabela `findings`)
+
+Os scan workers persistem os findings no Postgres conforme rodam — antes o
+pipeline só trafegava dicts em memória e nada chegava ao banco.
+
+- **Quem grava:** `tier1_scan_worker` (TruffleHog + Semgrep), `tier2_scan_worker`
+  (após o dedup) e `tier3_scan_worker` (findings do ZAP). Cada worker chama
+  `persist_findings(...)` (`app/infrastructure/persistence/finding_writer.py`).
+- **Como grava:** abre sua própria `Session` síncrona via `SessionLocal`
+  (workers Celery são síncronos) e usa
+  `SQLAlchemyFindingRepository.bulk_save(...)`, que faz
+  **`INSERT ... ON CONFLICT (dedup_key) DO NOTHING`**.
+- **Dedup em duas barreiras:** o `FindingDeduplicator` remove duplicatas em
+  memória (1ª barreira); a UNIQUE `findings_dedup_key` segura o que escapar —
+  ex.: o mesmo finding visto em T1 e re-visto em T2, ou corrida entre workers
+  paralelos (2ª barreira). Re-scan do mesmo commit **não** duplica linhas.
+- **Best-effort:** se o banco estiver indisponível ou o schema desalinhado, o
+  worker loga `finding_persistence_failed` e **segue** — o resultado do scan e o
+  fluxo do canvas não são afetados. Em sucesso: `findings_persisted count=<n> tier=<n>`.
+- **Liga/desliga:** flag `FINDINGS_PERSISTENCE_ENABLED` (default `True`; ver §9).
+  A suíte de testes desliga por padrão (`tests/conftest.py`) para não exigir
+  Postgres; os testes de persistência religam e injetam SQLite em memória.
+
+> Pré-requisito: a tabela `findings` é criada pela migration
+> `alembic upgrade head` (§1.3). Sem migration aplicada, a gravação cai no ramo
+> best-effort e só loga o warning.
+
+```bash
+# inspecionar findings persistidos de um commit
+docker compose -f docker-compose.base.yml exec -T db \
+  psql -U postgres -d aperia -c \
+  "select tier, source, severity, title from findings where commit_sha='deadbeefcafebabe0000000000000000deadbeef';"
+```
+
+---
+
 ## 5. Acompanhar a execução
 
 ```bash
@@ -521,6 +565,13 @@ docker compose -f docker-compose.base.yml exec -T redis redis-cli KEYS 'celery-t
 | `raw_output` | dict | JSON nativo do scanner |
 | `tier` | int | `1` / `2` / `3` |
 
+> **Persistido em `findings`:** o `FindingModel`
+> (`app/infrastructure/persistence/models/finding_model.py`) materializa
+> `Finding.dedup_key()` na coluna `dedup_key` com UNIQUE `findings_dedup_key` —
+> é o que garante idempotência via `ON CONFLICT DO NOTHING`. A `dedup_key` é
+> `source:cve_id|title:file:line:commit`, então o **mesmo CVE vindo de scanners
+> diferentes conta como 2 linhas** (o `source` faz parte da chave, por design).
+
 Severidade vs. gate:
 
 | Nível | Efeito |
@@ -538,6 +589,7 @@ No estado atual do MVP, ao disparar o webhook com o payload de exemplo você ver
 1. ✅ Tier 1 roda (TruffleHog + Semgrep) → **0 findings**, porque o
    `repo_path` é um stub (`/tmp/aperia/<sha>`) — o checkout real do repositório
    é "pós-MVP". Você verá `scanner_skipped ... No such file or directory`.
+   Com 0 findings, `persist_findings` é no-op (nada a gravar na tabela `findings`).
 2. ✅ Gate 1 passa (`blocked=False`).
 3. ✅ Tier 2 roda (Trivy executa) → 0 findings.
 4. ⚠️ `tier2_analyze` chama o Claude:
@@ -561,7 +613,7 @@ A suíte mocka Claude e scanners — é o jeito determinístico de validar a ló
 ```bash
 # local (venv com deps instaladas)
 source .venv/bin/activate
-pytest tests/ -q                          # ~397 testes
+pytest tests/ -q                          # 401 testes
 pytest tests/e2e/test_full_pipeline.py -v # canvas completo mockado
 pytest tests/ --cov=app --cov-fail-under=70
 
@@ -572,7 +624,14 @@ docker compose -f docker-compose.base.yml exec api pytest tests/ -q
 Estrutura: `tests/unit/` (domínio, prompts, circuit breaker), `tests/integration/`
 (scanners mockados via respx, SQLite em memória, Celery eager),
 `tests/e2e/test_full_pipeline.py` (canvas inteiro). Fixtures globais em
-`tests/conftest.py` ligam o modo eager do Celery e resetam o circuit breaker.
+`tests/conftest.py` ligam o modo eager do Celery, resetam o circuit breaker e
+**desligam a persistência de findings** (para os testes de worker não exigirem
+Postgres).
+
+Cobertura da persistência: `test_finding_repository.py` e `test_dedup_e2e.py`
+(repositório síncrono + dedup via UNIQUE, em SQLite) e
+`test_finding_persistence_worker.py` (worker grava no banco, `ON CONFLICT`
+não duplica, flag off = nada gravado, e falha de banco não quebra o scan).
 
 ---
 
@@ -593,6 +652,7 @@ Estrutura: `tests/unit/` (domínio, prompts, circuit breaker), `tests/integratio
 | `CALDERA_SANDBOX_MODE` | `True` | **inviolável** — `false` → `SandboxViolationError` |
 | `REDIS_URL` | `redis://redis:6379/0` | broker/result Celery |
 | `CELERY_TASK_ALWAYS_EAGER` | `False` | só testes (nunca prod) |
+| `FINDINGS_PERSISTENCE_ENABLED` | `True` | grava findings na tabela `findings` (workers); `false` desliga a escrita |
 | `SECRET_KEY` | `change-this-...` | JWT (trocar em prod) |
 
 > `DATABASE_URL` não está no `config.py`: é montada em

@@ -29,6 +29,7 @@ import structlog
 from app.core.celery_app import celery_app
 from app.domain.finding.entities import Finding
 from app.domain.finding.services import FindingDeduplicator
+from app.infrastructure.persistence.finding_writer import persist_findings
 from app.infrastructure.scanners.prowler_scanner import (
     ProwlerScanner,
     has_iac_files,
@@ -119,6 +120,8 @@ def run_tier2_scan(
 
     aggregated = trivy_findings + semgrep_findings + prowler_findings
     deduplicated = FindingDeduplicator().deduplicate(aggregated)
+
+    persist_findings(deduplicated, commit_sha=commit_sha, tier=2)
 
     logger.info(
         "tier2_scan_complete",

@@ -12,11 +12,29 @@ from __future__ import annotations
 
 import pytest
 
+from app.config import settings
 from app.core.celery_app import celery_app
 from app.infrastructure.ai.circuit_breaker import (
     DEFAULT_BREAKER,
     CircuitState,
 )
+
+
+@pytest.fixture(autouse=True)
+def disable_findings_persistence():
+    """Desliga a persistência best-effort de findings por padrão.
+
+    Os scan workers gravam no banco via ``SessionLocal`` (Postgres). Em
+    teste não há banco — desligamos globalmente para os testes de worker
+    não tentarem conectar. Os testes que exercitam a persistência ligam
+    o flag explicitamente e injetam uma Session sqlite.
+    """
+    original = settings.FINDINGS_PERSISTENCE_ENABLED
+    settings.FINDINGS_PERSISTENCE_ENABLED = False
+    try:
+        yield
+    finally:
+        settings.FINDINGS_PERSISTENCE_ENABLED = original
 
 
 @pytest.fixture(autouse=True)

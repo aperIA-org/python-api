@@ -29,6 +29,7 @@ import structlog
 from app.core.celery_app import celery_app
 from app.core.exceptions import SandboxViolationError
 from app.domain.finding.entities import Finding
+from app.infrastructure.persistence.finding_writer import persist_findings
 from app.infrastructure.intelligence.mitre_caldera_client import CalderaClient
 from app.infrastructure.intelligence.opencti_client import OpenCTIClient
 from app.infrastructure.scanners.zap_scanner import ZAPScanner
@@ -123,6 +124,8 @@ def run_tier3_scan(
             commit_sha=commit_sha,
             reason="no_target_url",
         )
+
+    persist_findings(zap_findings, commit_sha=commit_sha, tier=3)
 
     # ---- OpenCTI por CVE ----
     cves = _collect_cves(t2_findings)

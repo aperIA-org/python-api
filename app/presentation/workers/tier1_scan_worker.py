@@ -20,6 +20,7 @@ import structlog
 
 from app.core.celery_app import celery_app
 from app.domain.finding.entities import Finding
+from app.infrastructure.persistence.finding_writer import persist_findings
 from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner
 from app.infrastructure.scanners.trufflehog_scanner import TruffleHogScanner
 
@@ -59,6 +60,7 @@ def run_trufflehog(
         commit_sha=commit_sha,
         repo_url=repo_url,
     )
+    persist_findings(findings, commit_sha=commit_sha, tier=1)
     logger.info(
         "tier1_trufflehog_complete",
         commit_sha=commit_sha,
@@ -85,6 +87,7 @@ def run_semgrep_changed(
         commit_sha=commit_sha,
         repo_url=repo_url,
     )
+    persist_findings(findings, commit_sha=commit_sha, tier=1)
     logger.info(
         "tier1_semgrep_complete",
         commit_sha=commit_sha,

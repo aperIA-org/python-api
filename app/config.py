@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # ---- AI Security ----
     LLM_GUARD_ENABLED: bool = True
 
+    # ---- Persistência de findings ----
+    # Liga a escrita best-effort dos findings no banco a partir dos
+    # scan workers. Default True em produção; testes desligam por padrão
+    # (ver tests/conftest.py) para não exigir Postgres.
+    FINDINGS_PERSISTENCE_ENABLED: bool = True
+
     # ---- Celery / Redis ----
     # Default aponta para o hostname do container (docker-compose service "redis"),
     # não localhost — produção depende de DNS interno. Override via env em dev.

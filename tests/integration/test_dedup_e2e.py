@@ -13,7 +13,7 @@ Cenários do guia (Semana 7):
 Bonus: re-scan completo do mesmo commit (duas chamadas de
 ``bulk_save``) ainda resulta em 1 linha — idempotência real.
 
-Banco: SQLite em memória via ``aiosqlite``, criado por fixture com
+Banco: SQLite em memória (sync) criado por fixture com
 ``Base.metadata.create_all``. Os índices/UniqueConstraint vêm dos
 models — não da migration — para isolar o teste do Alembic.
 """
@@ -22,8 +22,9 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.domain.finding.entities import Finding
 from app.domain.finding.services import FindingDeduplicator
@@ -39,21 +40,25 @@ from app.infrastructure.repositories.sqlalchemy_finding_repository import (
 )
 
 
-@pytest_asyncio.fixture
-async def engine():
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+@pytest.fixture
+def engine():
+    eng = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
+    Base.metadata.create_all(eng)
     try:
         yield eng
     finally:
-        await eng.dispose()
+        eng.dispose()
 
 
-@pytest_asyncio.fixture
-async def session(engine):
-    factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
-    async with factory() as s:
+@pytest.fixture
+def session(engine):
+    factory = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    with factory() as s:
         yield s
 
 
@@ -104,36 +109,34 @@ class TestDomainDeduplicator:
 
 
 class TestDatabaseDedup:
-    @pytest.mark.asyncio
-    async def test_three_identical_persists_one(self, session):
+    def test_three_identical_persists_one(self, session):
         repo = SQLAlchemyFindingRepository(session)
         # 3 findings com mesma dedup_key (file_path/line/source/commit)
         common = dict(file_path="dup.py", line_number=42)
         findings = [_make(**common), _make(**common), _make(**common)]
         # Domain dedup → 1; ainda assim, simulamos o pior caso de
         # dedup pular tudo e mandar 3 ao banco — o constraint segura.
-        await repo.bulk_save(findings)
-        await session.commit()
+        repo.bulk_save(findings)
+        session.commit()
 
-        rows = await repo.get_by_commit("a" * 40)
+        rows = repo.get_by_commit("a" * 40)
         assert len(rows) == 1
 
-    @pytest.mark.asyncio
-    async def test_rescan_same_commit_is_idempotent(self, session):
+    def test_rescan_same_commit_is_idempotent(self, session):
         """T1 e depois T2 (re-scan) com mesmo finding = 1 linha."""
         repo = SQLAlchemyFindingRepository(session)
         f_t1 = _make(file_path="app/x.py", line_number=42)
-        await repo.bulk_save([f_t1])
-        await session.commit()
+        repo.bulk_save([f_t1])
+        session.commit()
 
         # Re-scan no Tier 2 gerou o "mesmo" finding (nova UUID, mesma
         # dedup_key).
         f_t2 = _make(file_path="app/x.py", line_number=42)
         f_t2.id = uuid4()
-        await repo.bulk_save([f_t2])
-        await session.commit()
+        repo.bulk_save([f_t2])
+        session.commit()
 
-        rows = await repo.get_by_commit("a" * 40)
+        rows = repo.get_by_commit("a" * 40)
         assert len(rows) == 1
 
 
@@ -143,8 +146,7 @@ class TestDatabaseDedup:
 
 
 class TestCrossScannerSeparation:
-    @pytest.mark.asyncio
-    async def test_trivy_and_semgrep_same_cve_kept_separate(self, session):
+    def test_trivy_and_semgrep_same_cve_kept_separate(self, session):
         repo = SQLAlchemyFindingRepository(session)
         cve = CVEId("CVE-2021-44228")
         common = dict(
@@ -154,10 +156,10 @@ class TestCrossScannerSeparation:
         )
         trivy_f = _make(source="trivy", **common, title="trivy:log4shell")
         semgrep_f = _make(source="semgrep", **common, title="semgrep:log4shell")
-        await repo.bulk_save([trivy_f, semgrep_f])
-        await session.commit()
+        repo.bulk_save([trivy_f, semgrep_f])
+        session.commit()
 
-        rows = await repo.get_by_commit("a" * 40)
+        rows = repo.get_by_commit("a" * 40)
         assert len(rows) == 2
         sources = sorted(r.source for r in rows)
         assert sources == ["semgrep", "trivy"]
@@ -179,8 +181,7 @@ class TestCrossScannerSeparation:
 
 
 class TestDomainPlusDbCombined:
-    @pytest.mark.asyncio
-    async def test_pipeline_dedupes_in_memory_then_db_seals(self, session):
+    def test_pipeline_dedupes_in_memory_then_db_seals(self, session):
         """Caminho realista: deduplicador remove 99% do volume, DB
         segura o ~1% que escapar (race entre workers paralelos)."""
         repo = SQLAlchemyFindingRepository(session)
@@ -197,19 +198,18 @@ class TestDomainPlusDbCombined:
         # Domain reduz 5 → 2 (mesma dedup_key)
         assert len(deduped) == 2
 
-        await repo.bulk_save(deduped)
-        await session.commit()
+        repo.bulk_save(deduped)
+        session.commit()
         # DB tem 2 linhas
-        assert len(await repo.get_by_commit("a" * 40)) == 2
+        assert len(repo.get_by_commit("a" * 40)) == 2
 
-    @pytest.mark.asyncio
-    async def test_db_catches_what_domain_misses(self, session):
+    def test_db_catches_what_domain_misses(self, session):
         """Se por algum motivo o deduplicador não rodar (race
         condition entre workers paralelos), o banco não duplica.
         Esse teste simula passing das duplicatas direto ao banco."""
         repo = SQLAlchemyFindingRepository(session)
         dup = dict(file_path="db.py", line_number=42)
         # 3 findings idênticos vão ao banco SEM passar pelo dedup do domain.
-        await repo.bulk_save([_make(**dup), _make(**dup), _make(**dup)])
-        await session.commit()
-        assert len(await repo.get_by_commit("a" * 40)) == 1
+        repo.bulk_save([_make(**dup), _make(**dup), _make(**dup)])
+        session.commit()
+        assert len(repo.get_by_commit("a" * 40)) == 1

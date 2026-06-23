@@ -28,14 +28,19 @@ from app.config import settings
 
 logger = structlog.get_logger()
 
-# Módulos de worker que precisam ser importáveis pelo Celery.
+# Módulos que precisam ser importáveis pelo Celery para registrar tasks.
 # A ordem é relevante apenas para logs — todos são validados.
+# ``app.core.orchestrator`` entra por ÚLTIMO: ele importa os 5 workers
+# acima + o ``celery_app`` (já criado neste ponto), e define as tasks de
+# bridge (`_t1_to_t2_scan_bridge` etc.). Sem registrá-lo nos workers, a
+# chain morre ao chegar no primeiro bridge ("unregistered task").
 WORKER_MODULES: tuple[str, ...] = (
     "app.presentation.workers.tier1_scan_worker",
     "app.presentation.workers.tier2_scan_worker",
     "app.presentation.workers.tier3_scan_worker",
     "app.presentation.workers.analysis_worker",
     "app.presentation.workers.reporting_worker",
+    "app.core.orchestrator",
 )
 
 
@@ -86,13 +91,22 @@ def _build_celery_app() -> Celery:
         # Visibilidade no Flower / logs
         task_send_sent_event=True,
         worker_send_task_events=True,
-        # Filas por tier
+        # Filas por tier.
+        # IMPORTANTE: o argumento ``queue=`` no decorator ``@celery_app.task``
+        # NÃO é honrado pelo router do Celery — roteamento vem daqui (ou de
+        # ``apply_async(queue=...)``). As tasks de bridge do orquestrador
+        # precisam de rotas explícitas, senão caem na fila default ``celery``,
+        # que nenhum worker consome, e o pipeline trava após o Gate 1.
         task_routes={
             "app.presentation.workers.tier1_scan_worker.*": {"queue": "tier1"},
             "app.presentation.workers.analysis_worker.*": {"queue": "analysis"},
             "app.presentation.workers.reporting_worker.*": {"queue": "reporting"},
             "app.presentation.workers.tier2_scan_worker.*": {"queue": "tier2"},
             "app.presentation.workers.tier3_scan_worker.*": {"queue": "tier3"},
+            "app.core.orchestrator._t1_to_t2_scan_bridge": {"queue": "tier2"},
+            "app.core.orchestrator._bridge_t1_findings_into_analyze": {"queue": "analysis"},
+            "app.core.orchestrator._prepare_tier3_payload": {"queue": "tier3"},
+            "app.core.orchestrator._deep_analysis_bridge": {"queue": "analysis"},
         },
         # Modo eager (testes)
         task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,

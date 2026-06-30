@@ -1,0 +1,79 @@
+# aperIA — scanners pesados (Tier 3)
+#
+# AVISO DE SEGURANÇA OPERACIONAL:
+#   ▸ ``caldera_sandbox`` está em rede ``aperia_caldera_sandbox``
+#     com ``internal: true`` — SEM rota de saída para internet ou
+#     outras redes. Caldera executa técnicas MITRE ATT&CK reais;
+#     isolamento de rede é o ÚNICO mecanismo que impede que
+#     movimento lateral em testes escape para sistemas reais.
+#   ▸ Nunca remover ``internal: true`` da ``aperia_caldera_sandbox``.
+#   ▸ ``CALDERA_SANDBOX_MODE: "true"`` é validado no cliente Python;
+#     remover essa env → ``SandboxViolationError`` no boot.
+#
+# Sobe junto com docker-compose.base.yml:
+#   docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml up -d
+
+services:
+  zap:
+    image: zaproxy/zap-stable:2.14.0
+    container_name: aperia-zap
+    command:
+      - zap.sh
+      - -daemon
+      - -host
+      - 0.0.0.0
+      - -port
+      - "8090"
+      - -config
+      - api.addrs.addr.name=.*
+      - -config
+      - api.addrs.addr.regex=true
+      - -config
+      - api.key=${ZAP_API_KEY:-changeme}
+    ports:
+      - "8090:8090"
+    networks:
+      - aperia_net
+
+  opencti:
+    image: opencti/platform:6.4.10
+    container_name: aperia-opencti
+    environment:
+      APP__ADMIN__EMAIL: admin@aperia.local
+      APP__ADMIN__PASSWORD: ${OPENCTI_ADMIN_PASSWORD:-changeme}
+      APP__ADMIN__TOKEN: ${OPENCTI_TOKEN:-00000000-0000-4000-0000-000000000000}
+      REDIS__HOSTNAME: redis
+      REDIS__PORT: 6379
+    depends_on:
+      - redis
+    ports:
+      - "8081:8080"
+    networks:
+      - aperia_net
+
+  caldera:
+    image: ghcr.io/mitre/caldera:5.0.0
+    container_name: aperia-caldera
+    environment:
+      # API key consumido pelo CalderaClient — settings.CALDERA_API_KEY
+      CALDERA_API_KEY: ${CALDERA_API_KEY:-changeme}
+    ports:
+      # Exposto APENAS para a rede interna; portas externas só para
+      # debugging em dev — em prod, remover a publicação para que
+      # apenas containers no aperia_net possam alcançar Caldera.
+      - "8888:8888"
+    networks:
+      # CRÍTICO: dupla conexão — aperia_net (apenas para o worker
+      # tier3 alcançar) + aperia_caldera_sandbox (rede interna onde
+      # adversários simulam técnicas).
+      - aperia_net
+      - aperia_caldera_sandbox
+
+networks:
+  # Rede isolada — sem rota para internet ou outras redes Docker.
+  # Targets simulados (agentes Caldera) só conseguem se comunicar
+  # com o servidor Caldera dentro desta rede.
+  aperia_caldera_sandbox:
+    driver: bridge
+    internal: true
+    name: aperia_caldera_sandbox

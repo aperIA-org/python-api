@@ -18,6 +18,11 @@ def _get_env(key: str, default: str | None = None) -> str | None:
 
 
 def _normalize_scheme(url: str) -> str:
+    # Este é o engine SÍNCRONO — sempre força o driver psycopg.
+    # DATABASE_URL pode vir com +asyncpg (usado pelo engine async); o
+    # asyncpg não aceita o argumento hostaddr e quebra o create_engine sync.
+    if url.startswith("postgresql+asyncpg://"):
+        return url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+psycopg://", 1)
     return url

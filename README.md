@@ -1,4 +1,4 @@
-# aperIA — ASPM com Heurística Ofensiva via Claude
+# aperIA — ASPM com Heurística Ofensiva via I.A
 
 aperIA é um **ASPM** (Application Security Posture Management) open-source que captura pushes/PRs do GitHub, executa uma esteira de 7+ ferramentas OSS em 3 tiers e usa Claude como motor central para raciocinar como um atacante: correlaciona findings, constrói attack paths e entrega patches como **GitHub code suggestions** para aprovação humana.
 

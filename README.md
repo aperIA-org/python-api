@@ -12,7 +12,7 @@ Esta seção é **obrigatória** — projeto de segurança não pode depender de
 
 ### Variáveis de ambiente obrigatórias
 
-Defina em `.env` na raiz do projeto:
+Defina em `.env` na raiz do projeto: 
 
 ```dotenv
 # ---- GitHub App (obrigatório para webhooks) ----

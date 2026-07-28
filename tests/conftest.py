@@ -38,6 +38,23 @@ def disable_findings_persistence():
 
 
 @pytest.fixture(autouse=True)
+def disable_scan_persistence():
+    """Desliga a persistência best-effort do ScanJob por padrão.
+
+    Mesmo racional do ``disable_findings_persistence``: os workers/orquestrador
+    gravam o ciclo de vida do ScanJob via ``SessionLocal`` (Postgres). Em teste
+    não há banco — desligamos globalmente. Os testes que exercitam a persistência
+    religam o flag e injetam uma Session sqlite.
+    """
+    original = settings.SCAN_PERSISTENCE_ENABLED
+    settings.SCAN_PERSISTENCE_ENABLED = False
+    try:
+        yield
+    finally:
+        settings.SCAN_PERSISTENCE_ENABLED = original
+
+
+@pytest.fixture(autouse=True)
 def celery_eager_mode():
     """Roda todas as tasks inline no processo do teste.
 

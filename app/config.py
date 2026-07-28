@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # (ver tests/conftest.py) para não exigir Postgres.
     FINDINGS_PERSISTENCE_ENABLED: bool = True
 
+    # ---- Persistência de status de scan (ScanJob) ----
+    # Liga a escrita best-effort do ciclo de vida do ScanJob (criação no
+    # start_pipeline + updates de status por tier nos workers). Mesmo
+    # racional do flag de findings: default True; testes desligam por padrão.
+    SCAN_PERSISTENCE_ENABLED: bool = True
+
     # ---- Celery / Redis ----
     # Default aponta para o hostname do container (docker-compose service "redis"),
     # não localhost — produção depende de DNS interno. Override via env em dev.

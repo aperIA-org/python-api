@@ -31,6 +31,7 @@ from app.infrastructure.ai.claude_client import (
 )
 from app.infrastructure.ai.models import REASONING
 from app.infrastructure.git.github_client import GitHubClient
+from app.infrastructure.persistence import scan_job_writer
 
 logger = structlog.get_logger()
 
@@ -90,6 +91,9 @@ def gate1_check(
                 commit_sha=commit_sha,
                 error=str(exc),
             )
+        # Registra o bloqueio na projeção do scan (best-effort).
+        scan_job_writer.mark_tier(commit_sha, 1, "done")
+        scan_job_writer.mark_blocked(commit_sha, 1)
         # Interrompe o chain Celery — Tier 2 e Tier 3 não rodam.
         raise Ignore()
 
@@ -98,6 +102,7 @@ def gate1_check(
         commit_sha=commit_sha,
         findings_count=len(flattened),
     )
+    scan_job_writer.mark_tier(commit_sha, 1, "done")
     return {"findings": flattened, "blocked": False}
 
 
@@ -115,6 +120,7 @@ def tier2_analyze(
     caldera_results: dict | None = None,
 ) -> dict[str, Any]:
     findings = gate1_output.get("findings", [])
+    scan_job_writer.mark_tier(commit_sha, 2, "running")
     user_prompt = prompts.chain_of_events.build(
         findings=findings,
         cti_data=cti_data,
@@ -141,6 +147,7 @@ def tier2_analyze(
             error_type=type(exc).__name__,
         )
         # Modo degradado: retorna findings brutos sem narrativa.
+        scan_job_writer.mark_tier(commit_sha, 2, "done")
         return {
             "degraded": True,
             "reason": type(exc).__name__,
@@ -155,6 +162,8 @@ def tier2_analyze(
     )
     analysis["degraded"] = False
     analysis["findings"] = findings
+    scan_job_writer.mark_tier(commit_sha, 2, "done")
+    scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
     return analysis
 
 
@@ -214,23 +223,27 @@ def tier3_gate(self, analysis: dict[str, Any]) -> dict[str, Any]:
     findings = analysis.get("findings", []) or []
     max_severity = _max_severity(findings)
 
+    commit_sha = _extract_commit(analysis)
+
     if max_severity in _TIER3_ESCALATION_SEVERITIES:
         logger.info(
             "tier3_escalated",
-            commit_sha=_extract_commit(analysis),
+            commit_sha=commit_sha,
             max_severity=max_severity,
             findings_count=len(findings),
             degraded=bool(analysis.get("degraded")),
         )
+        scan_job_writer.mark_tier(commit_sha, 3, "running")
         return analysis
 
     logger.info(
         "tier3_skipped",
-        commit_sha=_extract_commit(analysis),
+        commit_sha=commit_sha,
         max_severity=max_severity,
         findings_count=len(findings),
         reason="below_threshold",
     )
+    scan_job_writer.mark_tier(commit_sha, 3, "skipped")
     raise Ignore()
 
 
@@ -297,6 +310,7 @@ def tier3_deep_analysis(
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        scan_job_writer.mark_tier(commit_sha, 3, "done")
         return {
             "degraded": True,
             "reason": type(exc).__name__,
@@ -322,4 +336,6 @@ def tier3_deep_analysis(
     analysis["findings"] = findings
     analysis["cti_data"] = cti_data
     analysis["caldera_results"] = caldera_results
+    scan_job_writer.mark_tier(commit_sha, 3, "done")
+    scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
     return analysis

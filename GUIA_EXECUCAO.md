@@ -91,6 +91,21 @@ curl -s http://localhost:8000/health      # → {"status":"ok"}
 docker compose -f docker-compose.base.yml ps   # todos "healthy"/"Up"
 ```
 
+A documentação interativa da API fica disponível assim que a app sobe:
+
+```bash
+open http://localhost:8000/docs      # Swagger UI
+open http://localhost:8000/redoc     # ReDoc
+curl -s http://localhost:8000/openapi.json | head   # schema OpenAPI cru
+```
+
+Um snapshot versionado do schema está em `openapi.yaml` (OpenAPI 3.1). Ele é
+**gerado** a partir do código — após mudar rotas/schemas, regenere com:
+
+```bash
+.venv/bin/python scripts/export_openapi.py
+```
+
 Rotas disponíveis (registradas em `app/main.py`):
 
 | Método | Caminho | O que faz |
@@ -98,8 +113,16 @@ Rotas disponíveis (registradas em `app/main.py`):
 | `GET` | `/health` | Healthcheck → `{"status":"ok"}` |
 | `POST` | `/webhook/github` | Recebe webhook do GitHub (HMAC obrigatório) |
 | `POST` | `/users` | Cria usuário |
+| `GET` | `/users/{user_id}` | Consulta usuário por UUID |
 | `POST` | `/auth/login` | Login + tokens JWT |
 | `POST` | `/auth/refresh` | Rotação de refresh token |
+| `POST` | `/auth/logout` | Revoga refresh token (204 sempre) |
+| `GET` | `/findings` | Lista findings (filtros `commit_sha`/`severity`/`tier`/`source` + paginação; exige JWT) |
+| `GET` | `/findings/{finding_id}` | Detalhe de um finding, com `raw_output` (exige JWT) |
+| `GET` | `/scans` | Lista scans recentes com paginação (exige JWT) |
+| `GET` | `/scans/{commit_sha}` | Status por tier + `findings_summary` de um commit (exige JWT) |
+| `GET` | `/scans/{commit_sha}/report` | Relatórios (markdown + analysis_json) de todos os tiers (exige JWT) |
+| `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório de um tier específico (exige JWT) |
 
 > ⚠️ **`/metrics` não está conectado.** O README cita `GET /metrics`, mas
 > nenhum router de métricas é incluído em `app/main.py`. Os counters Prometheus

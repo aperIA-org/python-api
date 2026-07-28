@@ -1,4 +1,8 @@
-from sqlalchemy import select
+from __future__ import annotations
+
+from uuid import UUID
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.finding.entities import Finding
@@ -32,6 +36,32 @@ _INSERT_COLUMNS = (
 def _to_row(finding: Finding) -> dict:
     model = FindingModel.from_entity(finding)
     return {col: getattr(model, col) for col in _INSERT_COLUMNS}
+
+
+def _build_filters(
+    *,
+    commit_sha: str | None,
+    severity: str | None,
+    tier: int | None,
+    source: str | None,
+    secret_verified: bool | None,
+) -> list:
+    """Monta a lista de condições WHERE a partir dos filtros opcionais.
+
+    Só inclui a condição quando o argumento correspondente não é ``None``.
+    """
+    filters = []
+    if commit_sha is not None:
+        filters.append(FindingModel.commit_sha == commit_sha)
+    if severity is not None:
+        filters.append(FindingModel.severity == severity)
+    if tier is not None:
+        filters.append(FindingModel.tier == tier)
+    if source is not None:
+        filters.append(FindingModel.source == source)
+    if secret_verified is not None:
+        filters.append(FindingModel.secret_verified.is_(secret_verified))
+    return filters
 
 
 class SQLAlchemyFindingRepository(FindingRepository):
@@ -118,3 +148,62 @@ class SQLAlchemyFindingRepository(FindingRepository):
         )
         model = result.scalars().first()
         return model.to_entity() if model else None
+
+    def get_by_id(self, finding_id: UUID) -> Finding | None:
+        """Busca um finding pelo seu identificador único."""
+        result = self.db.execute(
+            select(FindingModel).where(FindingModel.id == finding_id)
+        )
+        model = result.scalars().first()
+        return model.to_entity() if model else None
+
+    def query(
+        self,
+        *,
+        commit_sha: str | None = None,
+        severity: str | None = None,
+        tier: int | None = None,
+        source: str | None = None,
+        secret_verified: bool | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Finding]:
+        """Lista findings com filtros opcionais, ordenados do mais recente
+        para o mais antigo, com paginação via ``limit``/``offset``.
+        """
+        filters = _build_filters(
+            commit_sha=commit_sha,
+            severity=severity,
+            tier=tier,
+            source=source,
+            secret_verified=secret_verified,
+        )
+        stmt = (
+            select(FindingModel)
+            .where(*filters)
+            .order_by(FindingModel.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = self.db.execute(stmt)
+        return [m.to_entity() for m in result.scalars().all()]
+
+    def count(
+        self,
+        *,
+        commit_sha: str | None = None,
+        severity: str | None = None,
+        tier: int | None = None,
+        source: str | None = None,
+        secret_verified: bool | None = None,
+    ) -> int:
+        """Conta findings que atendem aos filtros opcionais informados."""
+        filters = _build_filters(
+            commit_sha=commit_sha,
+            severity=severity,
+            tier=tier,
+            source=source,
+            secret_verified=secret_verified,
+        )
+        stmt = select(func.count()).select_from(FindingModel).where(*filters)
+        return self.db.execute(stmt).scalar_one()

@@ -6,6 +6,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
 )
 
@@ -16,6 +17,10 @@ from app.infrastructure.persistence.models.base import Base
 
 class ScanJobModel(Base):
     __tablename__ = "scan_jobs"
+
+    __table_args__ = (
+        UniqueConstraint("commit_sha", name="scan_jobs_commit_sha_key"),
+    )
 
     id = Column(Uuid(as_uuid=True), primary_key=True)
     commit_sha = Column(String(40), nullable=False)

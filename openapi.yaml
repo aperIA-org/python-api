@@ -1,0 +1,1389 @@
+# Gerado automaticamente a partir da app FastAPI (app.main:app). NAO editar a mao.
+# Fonte da verdade = codigo (rotas + schemas Pydantic). Para regenerar:
+#   .venv/bin/python scripts/export_openapi.py
+# Documentacao interativa em runtime: /docs (Swagger UI) e /redoc.
+openapi: 3.1.0
+info:
+  title: aperIA - Python API
+  description: '
+
+    API do **aperIA** — ASPM (Application Security Posture Management) open-source.
+
+
+    Um webhook de Pull Request do GitHub dispara um pipeline de scanners de
+
+    segurança em 3 tiers (via Celery). O Claude raciocina como atacante
+
+    (correlaciona findings, monta attack paths) e entrega patches como
+
+    **GitHub code suggestions** para aprovação humana.
+
+
+    > **Premissa inviolável:** o aperIA **nunca** aplica código sozinho.
+
+    > Todo patch sai como code suggestion para aprovação humana.
+
+    '
+  contact:
+    name: aperIA
+  license:
+    name: Open Source
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      tags:
+      - health
+      summary: Healthcheck
+      description: 'Retorna o estado de disponibilidade do serviço.
+
+
+        Usado por orquestradores/load balancers. Não verifica dependências
+
+        externas (banco, Redis) — responde `200` enquanto o processo estiver vivo.'
+      operationId: health_health_get
+      responses:
+        '200':
+          description: Serviço no ar.
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Health Health Get
+              example:
+                status: ok
+  /users:
+    post:
+      tags:
+      - users
+      summary: Criar usuário
+      description: 'Cria um novo usuário.
+
+
+        A senha (mínimo 8 caracteres) é armazenada com hash Argon2 e o e-mail
+
+        deve ser único. Retorna apenas o `id` do usuário recém-criado.'
+      operationId: create_user_users_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+        required: true
+      responses:
+        '201':
+          description: Usuário criado com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserCreatedResponse'
+        '400':
+          description: Erro de validação de domínio.
+          content:
+            application/json:
+              example:
+                detail: E-mail invalido
+        '409':
+          description: E-mail já cadastrado.
+          content:
+            application/json:
+              example:
+                detail: E-mail já cadastrado
+        '500':
+          description: 'Erro interno (ex.: falha de permissão no banco).'
+          content:
+            application/json:
+              example:
+                detail: Internal server error
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /users/{user_id}:
+    get:
+      tags:
+      - users
+      summary: Consultar usuário por ID
+      description: Retorna os dados públicos de um usuário a partir do seu UUID.
+      operationId: get_user_users__user_id__get
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      responses:
+        '200':
+          description: Usuário encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '404':
+          description: Usuário não encontrado.
+          content:
+            application/json:
+              example:
+                detail: Usuário não encontrado
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/login:
+    post:
+      tags:
+      - auth
+      summary: Login
+      description: 'Autentica o usuario e retorna um par access_token + refresh_token.
+
+
+        - access_token: JWT de curta duracao (15 min por padrao)
+
+        - refresh_token: token opaco de longa duracao (7 dias por padrao)'
+      operationId: login_auth_login_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+        required: true
+      responses:
+        '200':
+          description: Autenticação bem-sucedida.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Credenciais inválidas ou token expirado/revogado/reusado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '500':
+          description: Erro interno ao acessar o banco.
+          content:
+            application/json:
+              example:
+                detail: Internal server error
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/refresh:
+    post:
+      tags:
+      - auth
+      summary: Renovar tokens (rotação)
+      description: 'Troca um refresh_token valido por um novo par de tokens (rotacao).
+
+
+        Se o refresh_token ja tiver sido usado anteriormente (reuso suspeito),
+
+        toda a familia de tokens e invalidada.'
+      operationId: refresh_auth_refresh_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+        required: true
+      responses:
+        '200':
+          description: Novo par de tokens emitido.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Credenciais inválidas ou token expirado/revogado/reusado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '500':
+          description: Erro interno ao acessar o banco.
+          content:
+            application/json:
+              example:
+                detail: Internal server error
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/logout:
+    post:
+      tags:
+      - auth
+      summary: Logout
+      description: 'Invalida o refresh_token fornecido.
+
+        Sempre retorna 204, mesmo se o token ja estiver invalido (evita oracle).'
+      operationId: logout_auth_logout_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+        required: true
+      responses:
+        '204':
+          description: Token revogado (ou já inválido). Sem corpo de resposta.
+        '500':
+          description: Erro interno ao acessar o banco.
+          content:
+            application/json:
+              example:
+                detail: Internal server error
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /findings:
+    get:
+      tags:
+      - findings
+      summary: Listar findings
+      description: 'Lista findings persistidos, com filtros opcionais e paginacao.
+
+
+        Os resultados vem ordenados do mais recente para o mais antigo. O
+
+        campo `raw_output` (potencialmente grande) e omitido aqui — use
+
+        `GET /findings/{finding_id}` para o detalhe completo.'
+      operationId: list_findings_findings_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: commit_sha
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filtra pelo SHA do commit.
+          title: Commit Sha
+        description: Filtra pelo SHA do commit.
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - $ref: '#/components/schemas/FindingSeverity'
+          - type: 'null'
+          description: Filtra pela severidade.
+          title: Severity
+        description: Filtra pela severidade.
+      - name: tier
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 3
+            minimum: 1
+          - type: 'null'
+          description: Filtra pelo tier (1-3).
+          title: Tier
+        description: Filtra pelo tier (1-3).
+      - name: source
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'Filtra pela ferramenta de origem (ex.: semgrep).'
+          title: Source
+        description: 'Filtra pela ferramenta de origem (ex.: semgrep).'
+      - name: secret_verified
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          description: Filtra secrets verificados.
+          title: Secret Verified
+        description: Filtra secrets verificados.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          description: Tamanho da pagina.
+          default: 50
+          title: Limit
+        description: Tamanho da pagina.
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          description: Deslocamento para paginacao.
+          default: 0
+          title: Offset
+        description: Deslocamento para paginacao.
+      responses:
+        '200':
+          description: Pagina de findings que atendem aos filtros.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FindingPage'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /findings/{finding_id}:
+    get:
+      tags:
+      - findings
+      summary: Consultar finding por ID
+      description: Retorna o detalhe completo de um finding a partir do seu UUID.
+      operationId: get_finding_findings__finding_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: finding_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Finding Id
+      responses:
+        '200':
+          description: Detalhe do finding, incluindo `raw_output`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FindingDetail'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '404':
+          description: Finding nao encontrado.
+          content:
+            application/json:
+              example:
+                detail: Finding nao encontrado
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /scans:
+    get:
+      tags:
+      - scans
+      summary: Listar scans recentes
+      description: Lista scans recentes de forma paginada, ordenados do mais recente para o mais antigo.
+      operationId: list_scans_scans_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanJobPage'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /scans/{commit_sha}:
+    get:
+      tags:
+      - scans
+      summary: Consultar status de um scan por commit
+      description: Retorna o status detalhado de um scan pelo `commit_sha`, com resumo de findings.
+      operationId: get_scan_scans__commit_sha__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: commit_sha
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Commit Sha
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanJobResponse'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '404':
+          description: Scan nao encontrado.
+          content:
+            application/json:
+              example:
+                detail: Scan nao encontrado
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /scans/{commit_sha}/report:
+    get:
+      tags:
+      - scans
+      summary: Listar relatorios de um scan (todos os tiers)
+      description: 'Retorna todos os relatorios (um por tier) gerados para o `commit_sha`.
+
+
+        Se ainda nao houver relatorios persistidos mas o scan existir, retorna
+
+        lista vazia (scan em andamento). 404 somente se o scan nao existir.'
+      operationId: get_scan_reports_scans__commit_sha__report_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: commit_sha
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Commit Sha
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanReportsResponse'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '404':
+          description: Scan nao encontrado.
+          content:
+            application/json:
+              example:
+                detail: Scan nao encontrado
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /scans/{commit_sha}/tiers/{tier}/report:
+    get:
+      tags:
+      - scans
+      summary: Consultar relatorio de um tier especifico
+      description: Retorna o relatorio markdown de um tier especifico (1, 2 ou 3) para o `commit_sha`.
+      operationId: get_scan_report_by_tier_scans__commit_sha__tiers__tier__report_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: commit_sha
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Commit Sha
+      - name: tier
+        in: path
+        required: true
+        schema:
+          type: integer
+          maximum: 3
+          minimum: 1
+          title: Tier
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanReportResponse'
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '404':
+          description: Relatorio nao encontrado.
+          content:
+            application/json:
+              example:
+                detail: Relatorio nao encontrado
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /webhook/github:
+    post:
+      tags:
+      - webhook
+      summary: Webhook de eventos do GitHub
+      description: 'Recebe eventos do GitHub (GitHub App) e dispara o pipeline de segurança.
+
+
+        A assinatura HMAC-SHA256 do corpo é validada contra o header
+
+        `X-Hub-Signature-256` (segredo `GITHUB_WEBHOOK_SECRET`); assinatura
+
+        ausente/inválida retorna `401`.
+
+
+        Apenas eventos `pull_request` com ação `opened` ou `synchronize` disparam o
+
+        pipeline (`queued`). Payloads sem `installation.id` ou outros eventos são
+
+        ignorados (`ignored`).'
+      operationId: github_webhook_webhook_github_post
+      responses:
+        '200':
+          description: Evento processado (`queued` dispara o pipeline; `ignored` caso contrário).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Github Webhook Webhook Github Post
+              examples:
+                queued:
+                  summary: PR aberto/atualizado
+                  value:
+                    status: queued
+                    commit_sha: 9b2e1f0a...
+                ignored_event:
+                  summary: Evento não relevante
+                  value:
+                    status: ignored
+                    event: ping
+                ignored_no_installation:
+                  summary: Sem installation_id
+                  value:
+                    status: ignored
+                    reason: no installation_id
+        '401':
+          description: Assinatura HMAC ausente ou inválida.
+          content:
+            application/json:
+              example:
+                detail: Invalid HMAC signature
+      parameters:
+      - name: X-Hub-Signature-256
+        in: header
+        required: true
+        description: Assinatura HMAC-SHA256 do corpo bruto, no formato `sha256=<hex>`.
+        schema:
+          type: string
+        example: sha256=7d38cdd689735b008b3c702edd92eea23791c5f6
+      - name: X-GitHub-Event
+        in: header
+        required: false
+        description: 'Tipo do evento GitHub (ex.: `pull_request`, `ping`).'
+        schema:
+          type: string
+        example: pull_request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Payload de webhook do GitHub (apenas campos consumidos).
+              properties:
+                action:
+                  type: string
+                  example: opened
+                installation:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                      example: 12345678
+                repository:
+                  type: object
+                  properties:
+                    clone_url:
+                      type: string
+                      example: https://github.com/org/repo.git
+                    full_name:
+                      type: string
+                      example: org/repo
+                pull_request:
+                  type: object
+                  properties:
+                    number:
+                      type: integer
+                      example: 42
+                    head:
+                      type: object
+                      properties:
+                        sha:
+                          type: string
+                    base:
+                      type: object
+                      properties:
+                        sha:
+                          type: string
+components:
+  schemas:
+    FindingDetail:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        source:
+          type: string
+          title: Source
+        severity:
+          $ref: '#/components/schemas/FindingSeverity'
+        tier:
+          type: integer
+          title: Tier
+        title:
+          type: string
+          title: Title
+        description:
+          type: string
+          title: Description
+        cve_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cve Id
+        cwe_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cwe Id
+        file_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Path
+        line_number:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Line Number
+        asset:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Asset
+        asset_criticality:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Asset Criticality
+        secret_verified:
+          type: boolean
+          title: Secret Verified
+        secret_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Secret Type
+        commit_sha:
+          type: string
+          title: Commit Sha
+        repo_url:
+          type: string
+          title: Repo Url
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        raw_output:
+          additionalProperties: true
+          type: object
+          title: Raw Output
+      type: object
+      required:
+      - id
+      - source
+      - severity
+      - tier
+      - title
+      - description
+      - cve_id
+      - cwe_id
+      - file_path
+      - line_number
+      - asset
+      - asset_criticality
+      - secret_verified
+      - secret_type
+      - commit_sha
+      - repo_url
+      - created_at
+      - raw_output
+      title: FindingDetail
+      description: Representacao detalhada de um finding, incluindo `raw_output` do scanner.
+    FindingPage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/FindingResponse'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      type: object
+      required:
+      - items
+      - total
+      - limit
+      - offset
+      title: FindingPage
+      description: Pagina de resultados para listagem de findings.
+    FindingResponse:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        source:
+          type: string
+          title: Source
+        severity:
+          $ref: '#/components/schemas/FindingSeverity'
+        tier:
+          type: integer
+          title: Tier
+        title:
+          type: string
+          title: Title
+        description:
+          type: string
+          title: Description
+        cve_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cve Id
+        cwe_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cwe Id
+        file_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Path
+        line_number:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Line Number
+        asset:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Asset
+        asset_criticality:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Asset Criticality
+        secret_verified:
+          type: boolean
+          title: Secret Verified
+        secret_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Secret Type
+        commit_sha:
+          type: string
+          title: Commit Sha
+        repo_url:
+          type: string
+          title: Repo Url
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - source
+      - severity
+      - tier
+      - title
+      - description
+      - cve_id
+      - cwe_id
+      - file_path
+      - line_number
+      - asset
+      - asset_criticality
+      - secret_verified
+      - secret_type
+      - commit_sha
+      - repo_url
+      - created_at
+      title: FindingResponse
+      description: Representacao publica de um finding para listagem (sem `raw_output`).
+    FindingSeverity:
+      type: string
+      enum:
+      - critical
+      - high
+      - medium
+      - low
+      - info
+      title: FindingSeverity
+      description: Espelha o enum `Severity` do dominio para uso na camada de apresentacao.
+    FindingsSummary:
+      properties:
+        by_severity:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Severity
+        by_tier:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Tier
+        total:
+          type: integer
+          title: Total
+      type: object
+      required:
+      - by_severity
+      - by_tier
+      - total
+      title: FindingsSummary
+      description: 'Agregado de findings de um scan: por severidade, por tier e total.'
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    LoginRequest:
+      properties:
+        email:
+          type: string
+          title: Email
+        password:
+          type: string
+          title: Password
+      type: object
+      required:
+      - email
+      - password
+      title: LoginRequest
+    RefreshRequest:
+      properties:
+        refresh_token:
+          type: string
+          title: Refresh Token
+      type: object
+      required:
+      - refresh_token
+      title: RefreshRequest
+    ScanJobPage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ScanJobSummary'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      type: object
+      required:
+      - items
+      - total
+      - limit
+      - offset
+      title: ScanJobPage
+      description: Pagina de resultados da listagem de scans recentes.
+    ScanJobResponse:
+      properties:
+        commit_sha:
+          type: string
+          title: Commit Sha
+        repo_url:
+          type: string
+          title: Repo Url
+        repo_full_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Repo Full Name
+        pr_number:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Pr Number
+        tier1_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier1 Status
+        tier1_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier1 Started At
+        tier1_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier1 Completed At
+        tier2_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier2 Status
+        tier2_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier2 Started At
+        tier2_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier2 Completed At
+        tier3_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier3 Status
+        tier3_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier3 Started At
+        tier3_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier3 Completed At
+        blocked_at_tier:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Blocked At Tier
+        final_risk_score:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Final Risk Score
+        final_risk_level:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Final Risk Level
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        findings_summary:
+          $ref: '#/components/schemas/FindingsSummary'
+      type: object
+      required:
+      - commit_sha
+      - repo_url
+      - repo_full_name
+      - pr_number
+      - tier1_status
+      - tier1_started_at
+      - tier1_completed_at
+      - tier2_status
+      - tier2_started_at
+      - tier2_completed_at
+      - tier3_status
+      - tier3_started_at
+      - tier3_completed_at
+      - blocked_at_tier
+      - final_risk_score
+      - final_risk_level
+      - created_at
+      - findings_summary
+      title: ScanJobResponse
+      description: Representacao completa do status de um `ScanJob`, com resumo de findings.
+    ScanJobSummary:
+      properties:
+        commit_sha:
+          type: string
+          title: Commit Sha
+        repo_url:
+          type: string
+          title: Repo Url
+        repo_full_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Repo Full Name
+        pr_number:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Pr Number
+        tier1_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier1 Status
+        tier1_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier1 Started At
+        tier1_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier1 Completed At
+        tier2_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier2 Status
+        tier2_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier2 Started At
+        tier2_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier2 Completed At
+        tier3_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier3 Status
+        tier3_started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier3 Started At
+        tier3_completed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Tier3 Completed At
+        blocked_at_tier:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Blocked At Tier
+        final_risk_score:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Final Risk Score
+        final_risk_level:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Final Risk Level
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - commit_sha
+      - repo_url
+      - repo_full_name
+      - pr_number
+      - tier1_status
+      - tier1_started_at
+      - tier1_completed_at
+      - tier2_status
+      - tier2_started_at
+      - tier2_completed_at
+      - tier3_status
+      - tier3_started_at
+      - tier3_completed_at
+      - blocked_at_tier
+      - final_risk_score
+      - final_risk_level
+      - created_at
+      title: ScanJobSummary
+      description: Versao enxuta de `ScanJobResponse` (sem resumo de findings), usada em listagens.
+    ScanReportResponse:
+      properties:
+        tier:
+          type: integer
+          title: Tier
+        report_markdown:
+          type: string
+          title: Report Markdown
+        analysis_json:
+          additionalProperties: true
+          type: object
+          title: Analysis Json
+        degraded:
+          type: boolean
+          title: Degraded
+        comment_id:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Comment Id
+        posted:
+          type: boolean
+          title: Posted
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - tier
+      - report_markdown
+      - analysis_json
+      - degraded
+      - comment_id
+      - posted
+      - created_at
+      title: ScanReportResponse
+      description: Representacao de um `ScanReport` (relatorio markdown de um commit/tier).
+    ScanReportsResponse:
+      properties:
+        commit_sha:
+          type: string
+          title: Commit Sha
+        reports:
+          items:
+            $ref: '#/components/schemas/ScanReportResponse'
+          type: array
+          title: Reports
+      type: object
+      required:
+      - commit_sha
+      - reports
+      title: ScanReportsResponse
+      description: Lista de relatorios (um por tier) associados a um commit.
+    TokenResponse:
+      properties:
+        access_token:
+          type: string
+          title: Access Token
+        refresh_token:
+          type: string
+          title: Refresh Token
+        token_type:
+          type: string
+          title: Token Type
+          default: bearer
+      type: object
+      required:
+      - access_token
+      - refresh_token
+      title: TokenResponse
+    UserCreate:
+      properties:
+        username:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Username
+        password:
+          type: string
+          maxLength: 128
+          minLength: 8
+          title: Password
+        email:
+          type: string
+          maxLength: 500
+          minLength: 3
+          title: Email
+      additionalProperties: false
+      type: object
+      required:
+      - username
+      - password
+      - email
+      title: UserCreate
+    UserCreatedResponse:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+      type: object
+      required:
+      - id
+      title: UserCreatedResponse
+    UserResponse:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        username:
+          type: string
+          title: Username
+        email:
+          type: string
+          title: Email
+        created_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Created At
+        updated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - id
+      - username
+      - email
+      - created_at
+      - updated_at
+      title: UserResponse
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+  securitySchemes:
+    HTTPBearer:
+      type: http
+      scheme: bearer
+tags:
+- name: health
+  description: Verificação de disponibilidade do serviço.
+- name: auth
+  description: Autenticação e ciclo de vida de tokens (login, refresh com rotação, logout).
+- name: users
+  description: Criação e consulta de usuários.
+- name: findings
+  description: Consulta de findings de segurança persistidos pelo pipeline (protegido por JWT).
+- name: scans
+  description: Consulta do status/progresso do pipeline por commit (ScanJob) (protegido por JWT).
+- name: webhook
+  description: Recepção de eventos do GitHub que disparam o pipeline de segurança.

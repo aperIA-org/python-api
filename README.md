@@ -258,9 +258,33 @@ app/
 | `GET` | `/health` | Healthcheck |
 | `POST` | `/webhook/github` | Recebe webhook GitHub (HMAC obrigatório) |
 | `POST` | `/users` | Cria usuário (auth pré-existente) |
+| `GET` | `/users/{user_id}` | Consulta usuário por UUID |
 | `POST` | `/auth/login` | Login + emissão de tokens JWT |
 | `POST` | `/auth/refresh` | Refresh token rotation |
-| `GET` | `/metrics` | Prometheus metrics (latência, custo Claude, findings) |
+| `POST` | `/auth/logout` | Revoga refresh token (204 sempre) |
+| `GET` | `/findings` | Lista findings persistidos (filtros + paginação; **JWT**) |
+| `GET` | `/findings/{finding_id}` | Detalhe de um finding, com `raw_output` (**JWT**) |
+| `GET` | `/scans` | Lista scans recentes / progresso do pipeline (**JWT**) |
+| `GET` | `/scans/{commit_sha}` | Status por tier de um scan + resumo de findings (**JWT**) |
+| `GET` | `/scans/{commit_sha}/report` | Relatórios de todos os tiers do commit (**JWT**) |
+| `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório markdown de um tier específico (**JWT**) |
+| `GET` | `/metrics` | Prometheus metrics (latência, custo Claude, findings) — **ainda não exposto** |
+
+### Documentação da API (OpenAPI / Swagger)
+
+A app FastAPI gera a documentação a partir do próprio código (rotas + schemas
+Pydantic). Com a stack no ar:
+
+- **Swagger UI:** http://localhost:8000/docs
+- **ReDoc:** http://localhost:8000/redoc
+- **JSON cru:** http://localhost:8000/openapi.json
+
+Há também um snapshot versionado em [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1).
+Ele é **gerado** — não edite à mão. Após alterar rotas ou schemas, regenere com:
+
+```bash
+.venv/bin/python scripts/export_openapi.py
+```
 
 ---
 

@@ -286,6 +286,18 @@ def start_pipeline(
     Retorna o ``AsyncResult`` do canvas — útil em testes para
     inspecionar state. Em produção o webhook ignora o retorno.
     """
+    # Projeção consumível via API (GET /scans): cria o ScanJob com o Tier 1
+    # já em "running". Best-effort — falha de banco não impede o pipeline.
+    from app.infrastructure.persistence import scan_job_writer
+
+    scan_job_writer.create_scan_job(
+        commit_sha=commit_sha,
+        repo_url=repo_url,
+        installation_id=installation_id,
+        pr_number=pr_number,
+        repo_full_name=repo_full_name,
+    )
+
     canvas = build_pipeline_canvas(
         commit_sha=commit_sha,
         repo_url=repo_url,

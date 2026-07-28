@@ -20,6 +20,7 @@ from app.infrastructure.ai.claude_client import (
 )
 from app.infrastructure.ai.models import FORMATTING
 from app.infrastructure.git.github_client import GitHubClient
+from app.infrastructure.persistence import scan_report_writer
 
 logger = structlog.get_logger()
 
@@ -65,6 +66,7 @@ def post_tier2_report(
     # Propagação de Ignore upstream → no-op (Gate 1 bloqueou).
     if not analysis or not isinstance(analysis, dict):
         return None
+    report_degraded = bool(analysis.get("degraded"))
     if analysis.get("degraded"):
         body = _fallback_markdown(analysis)
         logger.info("tier2_report_degraded", commit_sha=commit_sha)
@@ -91,6 +93,7 @@ def post_tier2_report(
                 commit_sha=commit_sha,
                 error=str(exc),
             )
+            report_degraded = True
             body = _fallback_markdown(
                 {**analysis, "degraded": True, "reason": type(exc).__name__}
             )
@@ -113,6 +116,16 @@ def post_tier2_report(
             error=str(exc),
         )
         post_meta = {"posted": False, "error": str(exc)}
+    # Persiste o relatório na projeção consumível via API (best-effort).
+    scan_report_writer.persist_report(
+        commit_sha=commit_sha,
+        tier=2,
+        report_markdown=body,
+        analysis_json=analysis,
+        degraded=report_degraded,
+        comment_id=post_meta.get("comment_id"),
+        posted=bool(post_meta.get("posted")),
+    )
     # Retorna a análise inalterada (com metadado do post anexado) — o
     # canvas Celery precisa continuar com o ``analysis`` para o
     # ``tier3_gate`` a seguir.
@@ -205,6 +218,7 @@ def post_tier3_deep_report(
     """
     if not deep_analysis or not isinstance(deep_analysis, dict):
         return None
+    report_degraded = bool(deep_analysis.get("degraded"))
     if deep_analysis.get("degraded"):
         body = _fallback_t3_markdown(deep_analysis)
         logger.info("tier3_report_degraded", commit_sha=commit_sha)
@@ -234,6 +248,7 @@ def post_tier3_deep_report(
                 commit_sha=commit_sha,
                 error=str(exc),
             )
+            report_degraded = True
             body = _fallback_t3_markdown(
                 {
                     **deep_analysis,
@@ -262,6 +277,16 @@ def post_tier3_deep_report(
             error=str(exc),
         )
         post_meta = {"posted": False, "error": str(exc)}
+    # Persiste o relatório final na projeção consumível via API (best-effort).
+    scan_report_writer.persist_report(
+        commit_sha=commit_sha,
+        tier=3,
+        report_markdown=body,
+        analysis_json=deep_analysis,
+        degraded=report_degraded,
+        comment_id=post_meta.get("comment_id"),
+        posted=bool(post_meta.get("posted")),
+    )
     # Tier 3 é o último da chain — mesmo assim retornamos a análise
     # para consistência (orquestrador pode logar / inspecionar).
     return {**deep_analysis, "_post_meta": post_meta}

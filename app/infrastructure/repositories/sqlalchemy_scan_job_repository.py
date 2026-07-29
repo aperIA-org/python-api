@@ -124,3 +124,41 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
     def count(self) -> int:
         stmt = select(func.count()).select_from(ScanJobModel)
         return self.db.execute(stmt).scalar_one()
+
+    def list_by_user(self, user_id: UUID, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
+        result = self.db.execute(
+            select(ScanJobModel)
+            .where(ScanJobModel.user_id == user_id)
+            .order_by(ScanJobModel.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return [m.to_entity() for m in result.scalars().all()]
+
+    def count_by_user(self, user_id: UUID) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(ScanJobModel)
+            .where(ScanJobModel.user_id == user_id)
+        )
+        return self.db.execute(stmt).scalar_one()
+
+    def list_by_repository(
+        self, repository_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[ScanJob]:
+        result = self.db.execute(
+            select(ScanJobModel)
+            .where(ScanJobModel.repository_id == repository_id)
+            .order_by(ScanJobModel.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return [m.to_entity() for m in result.scalars().all()]
+
+    def count_by_repository(self, repository_id: UUID) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(ScanJobModel)
+            .where(ScanJobModel.repository_id == repository_id)
+        )
+        return self.db.execute(stmt).scalar_one()

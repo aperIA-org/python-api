@@ -49,3 +49,25 @@ class ScanJobRepository(ABC):
     def count(self) -> int:
         """Conta o total de scan jobs persistidos."""
         ...
+
+    @abstractmethod
+    def list_by_user(self, user_id: UUID, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
+        """Lista os scan jobs de um usuário, do mais recente para o mais antigo, com paginação."""
+        ...
+
+    @abstractmethod
+    def count_by_user(self, user_id: UUID) -> int:
+        """Conta o total de scan jobs de um usuário."""
+        ...
+
+    @abstractmethod
+    def list_by_repository(
+        self, repository_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[ScanJob]:
+        """Lista os scan jobs de um repositório, do mais recente para o mais antigo, com paginação."""
+        ...
+
+    @abstractmethod
+    def count_by_repository(self, repository_id: UUID) -> int:
+        """Conta o total de scan jobs de um repositório."""
+        ...

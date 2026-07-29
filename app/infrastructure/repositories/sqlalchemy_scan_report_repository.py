@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.scan.report_entities import ScanReport
 from app.domain.scan.report_repository import ScanReportRepository
+from app.infrastructure.persistence.models.scan_job_model import ScanJobModel
 from app.infrastructure.persistence.models.scan_report_model import ScanReportModel
 
 
@@ -94,3 +97,17 @@ class SQLAlchemyScanReportRepository(ScanReportRepository):
         )
         model = result.scalars().first()
         return model.to_entity() if model else None
+
+    def list_by_repository(self, repository_id: UUID) -> list[ScanReport]:
+        result = self.db.execute(
+            select(ScanReportModel)
+            .where(
+                ScanReportModel.commit_sha.in_(
+                    select(ScanJobModel.commit_sha).where(
+                        ScanJobModel.repository_id == repository_id
+                    )
+                )
+            )
+            .order_by(ScanReportModel.tier)
+        )
+        return [m.to_entity() for m in result.scalars().all()]

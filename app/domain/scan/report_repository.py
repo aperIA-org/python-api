@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from uuid import UUID
 
 from app.domain.scan.report_entities import ScanReport
 
@@ -19,3 +20,7 @@ class ScanReportRepository(ABC):
     @abstractmethod
     def get_by_commit_and_tier(self, commit_sha: str, tier: int) -> ScanReport | None:
         """Busca o relatório de um commit para um tier específico."""
+
+    @abstractmethod
+    def list_by_repository(self, repository_id: UUID) -> list[ScanReport]:
+        """Lista os relatórios de todos os commits de um repositório, ordenados por tier."""

@@ -25,4 +25,8 @@ class ScanJob:
     blocked_at_tier: ScanTier | None = None
     final_risk_score: int | None = None
     final_risk_level: str | None = None
+    # Multi-tenant: dono do scan (desnormalizado para filtro rápido) e
+    # repositório conectado que o originou. Nullable p/ scans legados.
+    user_id: UUID | None = None
+    repository_id: UUID | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)

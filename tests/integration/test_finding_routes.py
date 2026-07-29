@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.domain.finding.entities import Finding
 from app.domain.finding.value_objects import CVEId, Severity
+from app.domain.scan.entities import ScanJob
 from app.infrastructure.database.sqlalchemy import get_db
 from app.infrastructure.persistence.models.base import Base
 from app.infrastructure.persistence.models import (  # noqa: F401 — registra metadata
@@ -29,6 +30,9 @@ from app.infrastructure.persistence.models import (  # noqa: F401 — registra m
 )
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,
+)
+from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
+    SQLAlchemyScanJobRepository,
 )
 from app.infrastructure.security.jwt_handler import create_access_token
 from app.main import app
@@ -71,8 +75,13 @@ def client(session_factory):
 
 
 @pytest.fixture
-def auth_headers() -> dict[str, str]:
-    token = create_access_token(uuid4(), settings.SECRET_KEY, 15)
+def user_id():
+    return uuid4()
+
+
+@pytest.fixture
+def auth_headers(user_id) -> dict[str, str]:
+    token = create_access_token(user_id, settings.SECRET_KEY, 15)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -93,8 +102,8 @@ def _make_finding(**overrides) -> Finding:
 
 
 @pytest.fixture
-def seeded(session_factory):
-    """Persiste 3 findings variados e devolve a lista de entidades."""
+def seeded(session_factory, user_id):
+    """Persiste 3 findings + os ScanJobs donos (do usuário do token)."""
     findings = [
         _make_finding(severity=Severity.CRITICAL, source="trufflehog", tier=1,
                       secret_verified=True, secret_type="aws", title="AWS key vazada"),
@@ -103,8 +112,17 @@ def seeded(session_factory):
         _make_finding(severity=Severity.LOW, source="trivy", tier=2,
                       commit_sha="b" * 40, title="Dep desatualizada"),
     ]
+    # Os findings só são visíveis se o scan do commit pertence ao usuário.
+    jobs = [
+        ScanJob(commit_sha="a" * 40, repo_url="https://github.com/acme/repo",
+                installation_id=1, user_id=user_id),
+        ScanJob(commit_sha="b" * 40, repo_url="https://github.com/acme/repo",
+                installation_id=1, user_id=user_id),
+    ]
     with session_factory() as s:
         SQLAlchemyFindingRepository(s).bulk_save(findings)
+        for j in jobs:
+            SQLAlchemyScanJobRepository(s).save(j)
         s.commit()
     return findings
 

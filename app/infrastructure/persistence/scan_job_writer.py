@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 import structlog
 
@@ -35,10 +36,16 @@ def create_scan_job(
     installation_id: int,
     pr_number: int | None = None,
     repo_full_name: str | None = None,
+    user_id: UUID | None = None,
+    repository_id: UUID | None = None,
 ) -> None:
     """Cria (idempotente) o ``ScanJob`` no início do pipeline, com o Tier 1
     já em ``running``. Re-execuções (acks_late replay) não duplicam — o
     ``save`` usa ON CONFLICT na UNIQUE de ``commit_sha``.
+
+    ``user_id``/``repository_id`` atribuem o scan ao dono (multi-tenant); ficam
+    ``None`` para webhooks de repositórios não cadastrados (scan órfão, que não
+    aparece na leitura isolada de nenhum usuário).
     """
     if not settings.SCAN_PERSISTENCE_ENABLED:
         return
@@ -51,6 +58,8 @@ def create_scan_job(
             repo_full_name=repo_full_name,
             tier1_status=TierStatus.RUNNING,
             tier1_started_at=datetime.utcnow(),
+            user_id=user_id,
+            repository_id=repository_id,
         )
         with SessionLocal() as db:
             SQLAlchemyScanJobRepository(db).save(job)

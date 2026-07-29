@@ -16,6 +16,9 @@ from app.infrastructure.database.sqlalchemy import get_db
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,
 )
+from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
+    SQLAlchemyScanJobRepository,
+)
 from app.presentation.api.dependencies.auth import get_current_user
 from app.presentation.schemas.finding_schema import (
     FindingDetail,
@@ -53,6 +56,7 @@ router = APIRouter(
 )
 def list_findings(
     db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
     commit_sha: str | None = Query(None, description="Filtra pelo SHA do commit."),
     severity: FindingSeverity | None = Query(None, description="Filtra pela severidade."),
     tier: int | None = Query(None, ge=1, le=3, description="Filtra pelo tier (1-3)."),
@@ -62,11 +66,11 @@ def list_findings(
     offset: int = Query(0, ge=0, description="Deslocamento para paginacao."),
 ) -> FindingPage:
     """
-    Lista findings persistidos, com filtros opcionais e paginacao.
+    Lista findings do USUÁRIO logado, com filtros opcionais e paginacao.
 
-    Os resultados vem ordenados do mais recente para o mais antigo. O
-    campo `raw_output` (potencialmente grande) e omitido aqui — use
-    `GET /findings/{finding_id}` para o detalhe completo.
+    Isolado por dono: só retorna findings de commits cujos scans pertencem ao
+    usuário autenticado. Ordenados do mais recente para o mais antigo; o campo
+    `raw_output` é omitido aqui — use `GET /findings/{finding_id}` para o detalhe.
     """
     repo = SQLAlchemyFindingRepository(db)
     sev = severity.value if severity else None
@@ -76,6 +80,7 @@ def list_findings(
         tier=tier,
         source=source,
         secret_verified=secret_verified,
+        user_id=user_id,
         limit=limit,
         offset=offset,
     )
@@ -85,6 +90,7 @@ def list_findings(
         tier=tier,
         source=source,
         secret_verified=secret_verified,
+        user_id=user_id,
     )
     return FindingPage(
         items=[FindingResponse.from_entity(f) for f in items],
@@ -106,10 +112,18 @@ def list_findings(
         }
     },
 )
-def get_finding(finding_id: UUID, db: Session = Depends(get_db)) -> FindingDetail:
-    """Retorna o detalhe completo de um finding a partir do seu UUID."""
-    repo = SQLAlchemyFindingRepository(db)
-    finding = repo.get_by_id(finding_id)
+def get_finding(
+    finding_id: UUID,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> FindingDetail:
+    """Retorna o detalhe de um finding do usuário. 404 se não existir ou não
+    pertencer a um scan do usuário autenticado (não vaza existência)."""
+    finding = SQLAlchemyFindingRepository(db).get_by_id(finding_id)
     if finding is None:
+        raise HTTPException(status_code=404, detail="Finding nao encontrado")
+    # Ownership: o finding só é visível se o scan do seu commit for do usuário.
+    job = SQLAlchemyScanJobRepository(db).get_by_commit(finding.commit_sha)
+    if job is None or job.user_id != user_id:
         raise HTTPException(status_code=404, detail="Finding nao encontrado")
     return FindingDetail.from_entity(finding)

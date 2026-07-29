@@ -34,10 +34,17 @@ class FindingRepository(ABC):
         tier: int | None = None,
         source: str | None = None,
         secret_verified: bool | None = None,
+        user_id: UUID | None = None,
+        repository_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Finding]:
-        """Lista findings com filtros opcionais e paginação."""
+        """Lista findings com filtros opcionais e paginação.
+
+        ``user_id``/``repository_id`` restringem o resultado aos findings
+        cujo ``commit_sha`` pertence a um scan job daquele usuário/repositório
+        (escopo multi-tenant, via subquery em ``scan_jobs``).
+        """
         ...
 
     @abstractmethod
@@ -49,6 +56,12 @@ class FindingRepository(ABC):
         tier: int | None = None,
         source: str | None = None,
         secret_verified: bool | None = None,
+        user_id: UUID | None = None,
+        repository_id: UUID | None = None,
     ) -> int:
-        """Conta findings que atendem aos filtros opcionais informados."""
+        """Conta findings que atendem aos filtros opcionais informados.
+
+        ``user_id``/``repository_id`` restringem a contagem ao escopo
+        multi-tenant (via subquery em ``scan_jobs``), assim como em ``query``.
+        """
         ...

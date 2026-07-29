@@ -109,3 +109,24 @@ class GitHubClient:
             raw.raise_for_status()
             return raw.text
         return ""
+
+    def list_repositories(self) -> list[dict]:
+        """Lista os repositórios que a instalação enxerga.
+
+        Pagina ``GET /installation/repositories`` (100 por página). Cada item
+        traz ao menos ``id``, ``full_name``, ``html_url`` e ``default_branch``.
+        """
+        repos: list[dict] = []
+        page = 1
+        while True:
+            resp = self.client.get(
+                f"{self.BASE}/installation/repositories",
+                params={"per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json().get("repositories", []) or []
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return repos

@@ -79,13 +79,18 @@ def client(session_factory):
 
 
 @pytest.fixture
-def auth_headers() -> dict[str, str]:
-    token = create_access_token(uuid4(), settings.SECRET_KEY, 15)
+def auth_headers(user_id) -> dict[str, str]:
+    token = create_access_token(user_id, settings.SECRET_KEY, 15)
     return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
-def seeded(session_factory):
+def user_id():
+    return uuid4()
+
+
+@pytest.fixture
+def seeded(session_factory, user_id):
     job = ScanJob(
         commit_sha="a" * 40,
         repo_url="https://github.com/acme/repo",
@@ -97,10 +102,11 @@ def seeded(session_factory):
         blocked_at_tier=None,
         final_risk_score=80,
         final_risk_level="high",
+        user_id=user_id,
     )
     other = ScanJob(
         commit_sha="b" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
-        tier1_status=TierStatus.RUNNING,
+        tier1_status=TierStatus.RUNNING, user_id=user_id,
     )
     findings = [
         Finding(source="semgrep", severity=Severity.HIGH, title="t1", description="d",

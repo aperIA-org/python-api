@@ -268,7 +268,17 @@ app/
 | `GET` | `/scans/{commit_sha}` | Status por tier de um scan + resumo de findings (**JWT**) |
 | `GET` | `/scans/{commit_sha}/report` | Relatórios de todos os tiers do commit (**JWT**) |
 | `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório markdown de um tier específico (**JWT**) |
+| `GET` | `/github/connect` | Gera URL de instalação do App (`state` assinado) (**JWT**) |
+| `GET` | `/github/callback` | Callback pós-instalação; vincula a instalação ao usuário (`state`) |
+| `GET` | `/github/repos` | Lista repositórios visíveis pela instalação (**JWT**) |
+| `GET` `DELETE` | `/github/accounts[/{id}]` | Lista/desconecta contas GitHub conectadas (**JWT**) |
+| `POST` `GET` | `/repositories` | Ativa / lista repositórios conectados do usuário (**JWT**) |
+| `GET` `PATCH` `DELETE` | `/repositories/{id}` | Detalhe / ativar-desativar / remover (**JWT**) |
+| `GET` | `/repositories/{id}/scans\|findings\|reports` | Dados isolados por repositório (**JWT**) |
 | `GET` | `/metrics` | Prometheus metrics (latência, custo Claude, findings) — **ainda não exposto** |
+
+> **Multi-tenant:** as rotas de leitura são isoladas por usuário (JWT) — cada um só vê os próprios repositórios/scans/findings/relatórios. O webhook atribui o scan ao dono do repositório cadastrado.
+> **Pendência:** registrar o GitHub App (`GITHUB_APP_ID`/`GITHUB_PRIVATE_KEY_PATH`/`GITHUB_APP_SLUG`) para o fluxo de conexão funcionar.
 
 ### Documentação da API (OpenAPI / Swagger)
 

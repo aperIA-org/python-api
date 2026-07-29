@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     GITHUB_APP_ID: str = ""
     GITHUB_PRIVATE_KEY_PATH: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
+    # Slug do App (github.com/apps/<slug>) — usado para montar a URL de
+    # instalação em GET /github/connect. Preencher após registrar o App.
+    GITHUB_APP_SLUG: str = ""
+    # Para onde o /github/callback redireciona o browser do usuário após
+    # concluir a conexão (front-end). Vazio → responde JSON em vez de 302.
+    GITHUB_CONNECT_REDIRECT_URL: str = ""
 
     # ---- Anthropic / Claude ----
     ANTHROPIC_API_KEY: str = ""

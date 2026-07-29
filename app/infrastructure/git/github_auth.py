@@ -29,3 +29,22 @@ def get_installation_token(installation_id: int) -> str:
     )
     resp.raise_for_status()
     return resp.json()["token"]
+
+
+def get_installation_metadata(installation_id: int) -> dict:
+    """Lê os dados da instalação (login + tipo da conta) via JWT do App.
+
+    Retorna o dict ``account`` do GitHub, com ao menos ``login`` e ``type``
+    ("User" | "Organization").
+    """
+    resp = httpx.get(
+        f"https://api.github.com/app/installations/{installation_id}",
+        headers={
+            "Authorization": f"Bearer {_generate_jwt()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    return resp.json().get("account", {}) or {}

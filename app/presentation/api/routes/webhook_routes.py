@@ -84,6 +84,34 @@ _WEBHOOK_RESPONSES = {
 }
 
 
+def _resolve_owner(installation_id: int, github_repo_id: int | None) -> tuple:
+    """Resolve (user_id, repository_id) do repositório cadastrado, best-effort.
+
+    Só consulta o banco quando a persistência de scan está ligada (em teste
+    fica desligada → não exige Postgres). Repositório não cadastrado ou
+    inativo → ``(None, None)`` (o scan roda, mas fica órfão e não aparece na
+    leitura isolada de nenhum usuário).
+    """
+    if not settings.SCAN_PERSISTENCE_ENABLED or not github_repo_id:
+        return (None, None)
+    try:
+        from app.infrastructure.database.sqlalchemy import SessionLocal
+        from app.infrastructure.repositories.sqlalchemy_repository_repository import (
+            SQLAlchemyRepositoryRepository,
+        )
+
+        with SessionLocal() as db:
+            repo = SQLAlchemyRepositoryRepository(db).get_by_installation_and_repo(
+                installation_id, github_repo_id
+            )
+        if repo is None or not repo.active:
+            return (None, None)
+        return (repo.user_id, repo.id)
+    except Exception as exc:  # noqa: BLE001 — best-effort: nunca quebra o webhook
+        logger.warning("webhook_owner_resolve_failed", installation_id=installation_id, error=str(exc))
+        return (None, None)
+
+
 def _verify_hmac(payload: bytes, signature_header: str) -> bool:
     if not signature_header or not signature_header.startswith("sha256="):
         return False
@@ -136,7 +164,11 @@ async def github_webhook(request: Request) -> dict:
         repo_url = payload["repository"]["clone_url"]
         pr_number = payload["pull_request"]["number"]
         repo_full_name = payload["repository"]["full_name"]
+        github_repo_id = payload["repository"].get("id")
         base_sha = payload["pull_request"].get("base", {}).get("sha", commit_sha)
+
+        # Atribui o scan ao dono (repo cadastrado + ativo). Órfão se não achar.
+        user_id, repository_id = _resolve_owner(installation_id, github_repo_id)
 
         # Import tardio para evitar criar a app Celery durante o tempo
         # de carregamento dos testes do webhook.
@@ -147,6 +179,7 @@ async def github_webhook(request: Request) -> dict:
             commit_sha=commit_sha,
             pr_number=pr_number,
             repo=repo_full_name,
+            owned=bool(user_id),
         )
 
         # Para o MVP, o repo_path/changed_files virão de uma task de
@@ -165,6 +198,8 @@ async def github_webhook(request: Request) -> dict:
             head_sha=commit_sha,
             changed_files=[],
             target_url=None,
+            user_id=user_id,
+            repository_id=repository_id,
         )
         return {"status": "queued", "commit_sha": commit_sha}
 

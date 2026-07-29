@@ -40,6 +40,9 @@ class ScanJobModel(Base):
     blocked_at_tier = Column(SmallInteger)
     final_risk_score = Column(Integer)
     final_risk_level = Column(String(20))
+    # Multi-tenant: dono e repositório conectado (nullable p/ scans legados).
+    user_id = Column(Uuid(as_uuid=True))
+    repository_id = Column(Uuid(as_uuid=True))
     created_at = Column(DateTime, nullable=False)
 
     @classmethod
@@ -63,6 +66,8 @@ class ScanJobModel(Base):
             blocked_at_tier=job.blocked_at_tier.value if job.blocked_at_tier else None,
             final_risk_score=job.final_risk_score,
             final_risk_level=job.final_risk_level,
+            user_id=job.user_id,
+            repository_id=job.repository_id,
             created_at=job.created_at,
         )
 
@@ -88,5 +93,7 @@ class ScanJobModel(Base):
             else None,
             final_risk_score=self.final_risk_score,
             final_risk_level=self.final_risk_level,
+            user_id=self.user_id,
+            repository_id=self.repository_id,
             created_at=self.created_at,
         )

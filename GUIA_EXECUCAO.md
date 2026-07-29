@@ -123,6 +123,10 @@ Rotas disponíveis (registradas em `app/main.py`):
 | `GET` | `/scans/{commit_sha}` | Status por tier + `findings_summary` de um commit (exige JWT) |
 | `GET` | `/scans/{commit_sha}/report` | Relatórios (markdown + analysis_json) de todos os tiers (exige JWT) |
 | `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório de um tier específico (exige JWT) |
+| `GET` | `/github/connect` · `/github/callback` | Conectar conta GitHub (instalação do App + callback) |
+| `GET` | `/github/repos` · `/github/accounts` | Repos da instalação · contas conectadas (exige JWT) |
+| `POST`/`GET`/`PATCH`/`DELETE` | `/repositories[/{id}]` | CRUD dos repositórios conectados (isolado por usuário, JWT) |
+| `GET` | `/repositories/{id}/scans\|findings\|reports` | Scans/findings/relatórios do repositório (JWT) |
 
 > ⚠️ **`/metrics` não está conectado.** O README cita `GET /metrics`, mas
 > nenhum router de métricas é incluído em `app/main.py`. Os counters Prometheus

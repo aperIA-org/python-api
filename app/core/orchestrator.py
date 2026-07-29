@@ -280,6 +280,8 @@ def start_pipeline(
     head_sha: str,
     changed_files: list[str],
     target_url: str | None = None,
+    user_id: Any = None,
+    repository_id: Any = None,
 ) -> Any:
     """Entry point chamado pelo webhook.
 
@@ -296,6 +298,8 @@ def start_pipeline(
         installation_id=installation_id,
         pr_number=pr_number,
         repo_full_name=repo_full_name,
+        user_id=user_id,
+        repository_id=repository_id,
     )
 
     canvas = build_pipeline_canvas(

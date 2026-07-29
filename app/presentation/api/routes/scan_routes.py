@@ -9,6 +9,8 @@ aqui — o ciclo de vida do `ScanJob` e' gerenciado pelo pipeline Celery
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
@@ -60,6 +62,18 @@ def _build_summary(findings: list[Finding]) -> FindingsSummary:
     return FindingsSummary(by_severity=by_severity, by_tier=by_tier, total=len(findings))
 
 
+def _owned_job_or_404(db: Session, commit_sha: str, user_id: UUID):
+    """Retorna o ScanJob do commit se pertencer ao usuário; senão 404.
+
+    Isolamento: um usuário nunca enxerga o scan de outro. Usamos 404 (não 403)
+    para não vazar a existência do commit.
+    """
+    job = SQLAlchemyScanJobRepository(db).get_by_commit(commit_sha)
+    if job is None or job.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Scan nao encontrado")
+    return job
+
+
 @router.get(
     "",
     response_model=ScanJobPage,
@@ -67,13 +81,14 @@ def _build_summary(findings: list[Finding]) -> FindingsSummary:
 )
 def list_scans(
     db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> ScanJobPage:
-    """Lista scans recentes de forma paginada, ordenados do mais recente para o mais antigo."""
+    """Lista os scans do usuário logado, paginados (mais recentes primeiro)."""
     repo = SQLAlchemyScanJobRepository(db)
-    items = repo.list_recent(limit=limit, offset=offset)
-    total = repo.count()
+    items = repo.list_by_user(user_id, limit=limit, offset=offset)
+    total = repo.count_by_user(user_id)
     return ScanJobPage(
         items=[ScanJobSummary.from_entity(j) for j in items],
         total=total,
@@ -93,11 +108,13 @@ def list_scans(
         }
     },
 )
-def get_scan(commit_sha: str, db: Session = Depends(get_db)) -> ScanJobResponse:
-    """Retorna o status detalhado de um scan pelo `commit_sha`, com resumo de findings."""
-    job = SQLAlchemyScanJobRepository(db).get_by_commit(commit_sha)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Scan nao encontrado")
+def get_scan(
+    commit_sha: str,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> ScanJobResponse:
+    """Retorna o status de um scan do usuário pelo `commit_sha`, com resumo de findings."""
+    job = _owned_job_or_404(db, commit_sha, user_id)
 
     findings = SQLAlchemyFindingRepository(db).get_by_commit(commit_sha)
     summary = _build_summary(findings)
@@ -115,17 +132,18 @@ def get_scan(commit_sha: str, db: Session = Depends(get_db)) -> ScanJobResponse:
         }
     },
 )
-def get_scan_reports(commit_sha: str, db: Session = Depends(get_db)) -> ScanReportsResponse:
-    """Retorna todos os relatorios (um por tier) gerados para o `commit_sha`.
+def get_scan_reports(
+    commit_sha: str,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> ScanReportsResponse:
+    """Retorna os relatorios (um por tier) do `commit_sha`, se for do usuário.
 
-    Se ainda nao houver relatorios persistidos mas o scan existir, retorna
-    lista vazia (scan em andamento). 404 somente se o scan nao existir.
+    404 se o scan não existir ou não pertencer ao usuário. Lista vazia se o
+    scan existe mas ainda não há relatórios (pipeline em andamento).
     """
+    _owned_job_or_404(db, commit_sha, user_id)
     reports = SQLAlchemyScanReportRepository(db).get_by_commit(commit_sha)
-    if not reports:
-        if SQLAlchemyScanJobRepository(db).get_by_commit(commit_sha) is None:
-            raise HTTPException(status_code=404, detail="Scan nao encontrado")
-
     return ScanReportsResponse(
         commit_sha=commit_sha,
         reports=[ScanReportResponse.from_entity(r) for r in reports],
@@ -149,8 +167,10 @@ def get_scan_report_by_tier(
     commit_sha: str,
     tier: int = Path(..., ge=1, le=3),
     db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
 ) -> ScanReportResponse:
-    """Retorna o relatorio markdown de um tier especifico (1, 2 ou 3) para o `commit_sha`."""
+    """Retorna o relatorio de um tier (1-3) do `commit_sha`, se for do usuário."""
+    _owned_job_or_404(db, commit_sha, user_id)
     report = SQLAlchemyScanReportRepository(db).get_by_commit_and_tier(commit_sha, tier)
     if report is None:
         raise HTTPException(status_code=404, detail="Relatorio nao encontrado")

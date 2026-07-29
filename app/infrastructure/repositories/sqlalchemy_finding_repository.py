@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.domain.finding.entities import Finding
 from app.domain.finding.repositories import FindingRepository
 from app.infrastructure.persistence.models.finding_model import FindingModel
+from app.infrastructure.persistence.models.scan_job_model import ScanJobModel
 
 
 _INSERT_COLUMNS = (
@@ -45,10 +46,15 @@ def _build_filters(
     tier: int | None,
     source: str | None,
     secret_verified: bool | None,
+    user_id: UUID | None = None,
+    repository_id: UUID | None = None,
 ) -> list:
     """Monta a lista de condições WHERE a partir dos filtros opcionais.
 
     Só inclui a condição quando o argumento correspondente não é ``None``.
+    ``user_id``/``repository_id`` aplicam escopo multi-tenant: como findings
+    não têm dono próprio, o escopo vem de um subquery em ``scan_jobs`` pelo
+    ``commit_sha``.
     """
     filters = []
     if commit_sha is not None:
@@ -61,6 +67,20 @@ def _build_filters(
         filters.append(FindingModel.source == source)
     if secret_verified is not None:
         filters.append(FindingModel.secret_verified.is_(secret_verified))
+    if user_id is not None:
+        filters.append(
+            FindingModel.commit_sha.in_(
+                select(ScanJobModel.commit_sha).where(ScanJobModel.user_id == user_id)
+            )
+        )
+    if repository_id is not None:
+        filters.append(
+            FindingModel.commit_sha.in_(
+                select(ScanJobModel.commit_sha).where(
+                    ScanJobModel.repository_id == repository_id
+                )
+            )
+        )
     return filters
 
 
@@ -165,6 +185,8 @@ class SQLAlchemyFindingRepository(FindingRepository):
         tier: int | None = None,
         source: str | None = None,
         secret_verified: bool | None = None,
+        user_id: UUID | None = None,
+        repository_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Finding]:
@@ -177,6 +199,8 @@ class SQLAlchemyFindingRepository(FindingRepository):
             tier=tier,
             source=source,
             secret_verified=secret_verified,
+            user_id=user_id,
+            repository_id=repository_id,
         )
         stmt = (
             select(FindingModel)
@@ -196,6 +220,8 @@ class SQLAlchemyFindingRepository(FindingRepository):
         tier: int | None = None,
         source: str | None = None,
         secret_verified: bool | None = None,
+        user_id: UUID | None = None,
+        repository_id: UUID | None = None,
     ) -> int:
         """Conta findings que atendem aos filtros opcionais informados."""
         filters = _build_filters(
@@ -204,6 +230,8 @@ class SQLAlchemyFindingRepository(FindingRepository):
             tier=tier,
             source=source,
             secret_verified=secret_verified,
+            user_id=user_id,
+            repository_id=repository_id,
         )
         stmt = select(func.count()).select_from(FindingModel).where(*filters)
         return self.db.execute(stmt).scalar_one()

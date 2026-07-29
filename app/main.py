@@ -9,7 +9,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.infrastructure.database.sqlalchemy import engine
 from app.presentation.api.routes.auth_routes import router as auth_router
 from app.presentation.api.routes.finding_routes import router as finding_router
+from app.presentation.api.routes.github_routes import router as github_router
 from app.presentation.api.routes.health_routes import router as health_router
+from app.presentation.api.routes.repository_routes import router as repository_router
 from app.presentation.api.routes.scan_routes import router as scan_router
 from app.presentation.api.routes.user_routes import router as user_router
 from app.presentation.api.routes.webhook_routes import router as webhook_router
@@ -42,6 +44,14 @@ _TAGS_METADATA = [
     {
         "name": "scans",
         "description": "Consulta do status/progresso do pipeline por commit (ScanJob) (protegido por JWT).",
+    },
+    {
+        "name": "github",
+        "description": "Conexão da conta GitHub (instalação do App) e repos disponíveis (protegido por JWT).",
+    },
+    {
+        "name": "repositories",
+        "description": "Gestão dos repositórios conectados para análise, isolados por usuário (protegido por JWT).",
     },
     {
         "name": "webhook",
@@ -77,4 +87,6 @@ app.include_router(user_router)
 app.include_router(auth_router)
 app.include_router(finding_router)
 app.include_router(scan_router)
+app.include_router(github_router)
+app.include_router(repository_router)
 app.include_router(webhook_router, prefix="/webhook")

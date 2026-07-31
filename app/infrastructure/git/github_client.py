@@ -110,6 +110,19 @@ class GitHubClient:
             return raw.text
         return ""
 
+    def get_branch_head_sha(self, repo_full_name: str, branch: str) -> str:
+        """Resolve o SHA do commit HEAD de um branch.
+
+        Usado pelo scan manual (``POST /repositories/{id}/scan``), que não tem
+        PR de onde tirar o ``head.sha``. ``GET /repos/{repo}/commits/{ref}``
+        aceita branch, tag ou SHA e devolve o commit resolvido.
+        """
+        resp = self.client.get(
+            f"{self.BASE}/repos/{repo_full_name}/commits/{branch}"
+        )
+        resp.raise_for_status()
+        return resp.json()["sha"]
+
     def list_repositories(self) -> list[dict]:
         """Lista os repositórios que a instalação enxerga.
 

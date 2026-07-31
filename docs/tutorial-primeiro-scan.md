@@ -63,8 +63,9 @@ Devemos ver:
 
 ## Passo 5 — Disparar um webhook simulado
 
-O pipeline é iniciado por um webhook `pull_request` do GitHub. Como ainda não
-temos um GitHub App configurado, vamos simular esse webhook localmente:
+No uso normal, o pipeline é iniciado por um webhook `pull_request` do GitHub.
+Como ainda não temos um GitHub App configurado, vamos simular esse webhook
+localmente:
 montamos o payload e assinamos o HMAC com uma chave vazia (o default de
 `GITHUB_WEBHOOK_SECRET` é `""`, então isso funciona sem nenhuma configuração
 extra).

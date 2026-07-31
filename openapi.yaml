@@ -625,7 +625,18 @@ paths:
 
         A identidade vem do `state` assinado (não do header JWT — é o browser do
 
-        usuário que chega aqui). Faz upsert da `GithubAccount`.'
+        usuário que chega aqui). Faz upsert da `GithubAccount`.
+
+
+        Quem chega aqui é um **browser**, não um cliente de API: com
+
+        `GITHUB_CONNECT_REDIRECT_URL` configurada, um `state` inválido/expirado
+
+        também redireciona (302) para o front, com `github=erro&motivo=state`, em
+
+        vez de deixar o usuário num JSON de erro no host da API. Sem a URL
+
+        configurada mantemos o `400`.'
       operationId: callback_github_callback_get
       parameters:
       - name: installation_id
@@ -654,8 +665,11 @@ paths:
           content:
             application/json:
               schema: {}
+        '302':
+          description: Redirect para `GITHUB_CONNECT_REDIRECT_URL` quando configurada. Em erro de `state`,
+            com `github=erro&motivo=state` na query.
         '400':
-          description: state ausente ou inválido.
+          description: state ausente ou inválido (sem URL de redirect configurada).
         '422':
           description: Validation Error
           content:
@@ -724,7 +738,31 @@ paths:
       tags:
       - github
       summary: Desconectar conta GitHub
-      description: Remove o vínculo da conta GitHub. 404 se não pertencer ao usuário.
+      description: 'Remove o vínculo da conta GitHub. 404 se não pertencer ao usuário.
+
+
+        Remove **na mesma transação** os `repositories` vinculados a essa conta.
+
+        Não existe `ForeignKey` entre `github_accounts` e `repositories`, então a
+
+        limpeza é explícita: sem ela os repositórios ficariam fantasmas —
+
+        `GET /repositories` os listaria como ativos enquanto `GET /github/repos`
+
+        não os mostraria mais (a instalação deixou de existir).
+
+
+        **Findings, scans e relatórios são preservados.** O histórico de segurança
+
+        já coletado é o produto: apagá-lo ao desconectar destruiria auditoria por
+
+        uma ação reversível (o usuário pode reinstalar o App). Esses registros
+
+        continuam acessíveis por `GET /findings` e `GET /scans` (escopo do
+
+        usuário); apenas as rotas `/repositories/{id}/…` deixam de resolver,
+
+        porque o vínculo com o repositório desapareceu.'
       operationId: delete_account_github_accounts__account_id__delete
       security:
       - HTTPBearer: []
@@ -789,7 +827,16 @@ paths:
 
         caso contrário retorna 404 (sem revelar se a conta existe para outro
 
-        usuário).'
+        usuário).
+
+
+        A operação é um **upsert** por `(user_id, github_repo_id)`: reativar um
+
+        repositório desativado é um POST. A resposta traz o estado REAL persistido
+
+        — em particular o `id` da linha existente, não o uuid gerado em memória
+
+        (que não existiria no banco e faria `PATCH`/`DELETE` retornarem 404).'
       operationId: create_repository_repositories_post
       requestBody:
         content:
@@ -928,6 +975,77 @@ paths:
                 detail: Credenciais invalidas ou token expirado.
         '404':
           description: Repositorio nao encontrado.
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /repositories/{repository_id}/scan:
+    post:
+      tags:
+      - repositories
+      summary: Iniciar scan manual do repositório
+      description: "Dispara, sob demanda, o **mesmo** pipeline que o webhook de PR dispara.\n\nO commit\
+        \ analisado é o HEAD do `default_branch` do repositório, resolvido\nao vivo no GitHub com o installation\
+        \ token. Como não há PR, o pipeline roda\ncom `pr_number=None`: os relatórios ficam na projeção\
+        \ da API em vez de\nvirarem comentário de PR.\n\nContrato de erros:\n\n- `404` se o repositório\
+        \ não existir **ou** não pertencer ao usuário (nunca\n  403 — não vazamos a existência do recurso).\n\
+        - `409` se o repositório estiver `active=false`. Desativado significa \"não\n  analisar\": um\
+        \ scan manual aqui seria contraditório, e responder 404\n  esconderia do usuário um repositório\
+        \ que ele mesmo pode reativar via\n  `PATCH /repositories/{id}`. Por isso 409 com mensagem explícita.\n\
+        - `409` se já existir um `ScanJob` em andamento (algum tier `queued`/\n  `running`) para o commit\
+        \ resolvido — evita duplicar o pipeline.\n- `502` se o GitHub não responder o HEAD do branch.\n\
+        - `503` se o GitHub App não estiver configurado (mesmo espírito do\n  `GET /github/connect`, mas\
+        \ aqui o que falta são as credenciais do App —\n  `GITHUB_APP_ID` / `GITHUB_PRIVATE_KEY_PATH`\
+        \ — necessárias para emitir o\n  installation token)."
+      operationId: trigger_repository_scan_repositories__repository_id__scan_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: repository_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Repository Id
+      responses:
+        '202':
+          description: Pipeline disparado para o HEAD do branch default.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManualScanResponse'
+              example:
+                status: queued
+                commit_sha: 9b2e1f0a
+                branch: main
+        '401':
+          description: Token ausente, invalido ou expirado.
+          content:
+            application/json:
+              example:
+                detail: Credenciais invalidas ou token expirado.
+        '404':
+          description: Repositorio nao encontrado.
+        '409':
+          description: Repositorio desativado, ou scan já em andamento para o commit.
+          content:
+            application/json:
+              examples:
+                desativado:
+                  summary: Repositório desativado
+                  value:
+                    detail: 'Repositorio desativado: reative antes de iniciar um scan.'
+                em_andamento:
+                  summary: Scan já rodando para o mesmo commit
+                  value:
+                    detail: Ja existe um scan em andamento para o commit 9b2e1f0a.
+        '502':
+          description: Falha ao consultar o GitHub para resolver o HEAD do branch.
+        '503':
+          description: GitHub App nao configurado.
         '422':
           description: Validation Error
           content:
@@ -1243,6 +1361,21 @@ components:
         active:
           type: boolean
           title: Active
+        private:
+          type: boolean
+          title: Private
+          default: false
+        language:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Language
+        pushed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Pushed At
       type: object
       required:
       - github_account_id
@@ -1257,7 +1390,14 @@ components:
 
         ``active`` indica se já foi ativado para análise pelo usuário.
 
-        ``github_account_id`` é o que o front envia depois em ``POST /repositories``.'
+        ``github_account_id`` é o que o front envia depois em ``POST /repositories``.
+
+
+        ``private``, ``language`` e ``pushed_at`` são metadados que já vêm no
+
+        payload de ``GET /installation/repositories`` — expostos aqui para a tela
+
+        de ativação não precisar de nenhuma chamada extra ao GitHub.'
     ConnectResponse:
       properties:
         install_url:
@@ -1561,6 +1701,29 @@ components:
       - email
       - password
       title: LoginRequest
+    ManualScanResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+        commit_sha:
+          type: string
+          title: Commit Sha
+        branch:
+          type: string
+          title: Branch
+      type: object
+      required:
+      - status
+      - commit_sha
+      - branch
+      title: ManualScanResponse
+      description: 'Aceite de um scan manual (`POST /repositories/{id}/scan`).
+
+
+        No espirito da resposta do webhook (`{"status": "queued", "commit_sha": ...}`),
+
+        acrescentando o `branch` cujo HEAD foi resolvido.'
     RefreshRequest:
       properties:
         refresh_token:

@@ -56,7 +56,7 @@ def post_tier2_report(
     analysis: dict[str, Any] | None,
     *,
     repo_full_name: str,
-    pr_number: int,
+    pr_number: int | None,
     commit_sha: str,
     installation_id: int,
 ) -> dict[str, Any] | None:
@@ -99,23 +99,29 @@ def post_tier2_report(
             )
 
     post_meta: dict[str, Any]
-    try:
-        comment_id = GitHubClient(installation_id=installation_id).post_pr_comment(
-            repo_full_name=repo_full_name, pr_number=pr_number, body=body
-        )
-        logger.info(
-            "tier2_report_posted",
-            commit_sha=commit_sha,
-            comment_id=comment_id,
-        )
-        post_meta = {"comment_id": comment_id, "posted": True}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "tier2_report_post_failed",
-            commit_sha=commit_sha,
-            error=str(exc),
-        )
-        post_meta = {"posted": False, "error": str(exc)}
+    if pr_number is None:
+        # Scan manual (de branch): não há PR onde comentar. O relatório fica
+        # apenas na projeção consumível via API — evita um POST que falharia.
+        logger.info("tier2_report_sem_pr", commit_sha=commit_sha)
+        post_meta = {"posted": False, "reason": "sem_pr"}
+    else:
+        try:
+            comment_id = GitHubClient(installation_id=installation_id).post_pr_comment(
+                repo_full_name=repo_full_name, pr_number=pr_number, body=body
+            )
+            logger.info(
+                "tier2_report_posted",
+                commit_sha=commit_sha,
+                comment_id=comment_id,
+            )
+            post_meta = {"comment_id": comment_id, "posted": True}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier2_report_post_failed",
+                commit_sha=commit_sha,
+                error=str(exc),
+            )
+            post_meta = {"posted": False, "error": str(exc)}
     # Persiste o relatório na projeção consumível via API (best-effort).
     scan_report_writer.persist_report(
         commit_sha=commit_sha,
@@ -204,7 +210,7 @@ def post_tier3_deep_report(
     deep_analysis: dict[str, Any] | None,
     *,
     repo_full_name: str,
-    pr_number: int,
+    pr_number: int | None,
     commit_sha: str,
     installation_id: int,
 ) -> dict[str, Any] | None:
@@ -258,25 +264,30 @@ def post_tier3_deep_report(
             )
 
     post_meta: dict[str, Any]
-    try:
-        comment_id = GitHubClient(installation_id=installation_id).post_pr_comment(
-            repo_full_name=repo_full_name,
-            pr_number=pr_number,
-            body=body,
-        )
-        logger.info(
-            "tier3_report_posted",
-            commit_sha=commit_sha,
-            comment_id=comment_id,
-        )
-        post_meta = {"comment_id": comment_id, "posted": True}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "tier3_report_post_failed",
-            commit_sha=commit_sha,
-            error=str(exc),
-        )
-        post_meta = {"posted": False, "error": str(exc)}
+    if pr_number is None:
+        # Scan manual (de branch): sem PR onde comentar — ver post_tier2_report.
+        logger.info("tier3_report_sem_pr", commit_sha=commit_sha)
+        post_meta = {"posted": False, "reason": "sem_pr"}
+    else:
+        try:
+            comment_id = GitHubClient(installation_id=installation_id).post_pr_comment(
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                body=body,
+            )
+            logger.info(
+                "tier3_report_posted",
+                commit_sha=commit_sha,
+                comment_id=comment_id,
+            )
+            post_meta = {"comment_id": comment_id, "posted": True}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier3_report_post_failed",
+                commit_sha=commit_sha,
+                error=str(exc),
+            )
+            post_meta = {"posted": False, "error": str(exc)}
     # Persiste o relatório final na projeção consumível via API (best-effort).
     scan_report_writer.persist_report(
         commit_sha=commit_sha,

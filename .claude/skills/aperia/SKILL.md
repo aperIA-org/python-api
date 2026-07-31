@@ -56,7 +56,12 @@ app/
 
 ## O pipeline de scan (Celery canvas)
 
-Definido em `app/core/orchestrator.py` (`build_pipeline_canvas` / `start_pipeline`). Disparado por `POST /webhook/github` (HMAC obrigatório; actions `opened`/`synchronize`).
+Definido em `app/core/orchestrator.py` (`build_pipeline_canvas` / `start_pipeline`). Dois gatilhos, um único ponto de disparo — `dispatch_pipeline` em `app/application/use_cases/trigger_scan_use_case.py`, onde vivem os argumentos "de MVP" do canvas:
+
+- `POST /webhook/github` — HMAC obrigatório; actions `opened`/`synchronize`.
+- `POST /repositories/{id}/scan` — scan manual no HEAD do `default_branch` (`TriggerRepositoryScanUseCase` resolve o SHA via `GitHubClient.get_branch_head_sha`), com `pr_number=None`.
+
+`pr_number=None` não muda o canvas: os workers de reporting pulam o `post_pr_comment` (log `tier*_report_sem_pr`) e o Gate 1 continua criando o status check no commit.
 
 ```
 group(run_trufflehog, run_semgrep_changed)          [tier1]
@@ -158,4 +163,4 @@ Git: branch principal `main`. Docs de execução detalhadas em `GUIA_EXECUCAO.md
 - `RiskScorer` determinístico não está plugado (score vem do Claude); `_cti_component` lê `active_campaigns` mas o scan T3 produz `active_threat` (divergência latente).
 - `/metrics` Prometheus **não exposto** (counters existem em `token_metrics.py`, falta `make_asgi_app()`).
 - Checkout real do repo é "pós-MVP" — `repo_path` é stub (`/tmp/aperia/<sha>`), então scans reais retornam 0 findings localmente.
-- `changed_files`/`target_url` chegam vazios/None do webhook no MVP.
+- `changed_files`/`target_url` chegam vazios/None no MVP — definidos em `dispatch_pipeline`, valem para os dois gatilhos.

@@ -153,3 +153,15 @@ class ScanReportsResponse(BaseModel):
 
     commit_sha: str
     reports: list[ScanReportResponse]
+
+
+class ManualScanResponse(BaseModel):
+    """Aceite de um scan manual (`POST /repositories/{id}/scan`).
+
+    No espirito da resposta do webhook (`{"status": "queued", "commit_sha": ...}`),
+    acrescentando o `branch` cujo HEAD foi resolvido.
+    """
+
+    status: str
+    commit_sha: str
+    branch: str

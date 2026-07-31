@@ -39,8 +39,13 @@ class RepositoryRepository(ABC):
     """Interface síncrona de persistência para ``Repository``."""
 
     @abstractmethod
-    def save(self, repository: Repository) -> None:
-        """Persiste um repositório de forma idempotente por ``(user_id, github_repo_id)``."""
+    def save(self, repository: Repository) -> Repository:
+        """Persiste um repositório de forma idempotente por ``(user_id, github_repo_id)``.
+
+        Devolve a linha **efetivamente persistida**: em caso de conflito o
+        ``id`` da linha existente é preservado, e é esse que o caller precisa
+        expor (o ``id`` da entidade em memória seria um uuid inexistente).
+        """
         ...
 
     @abstractmethod
@@ -68,4 +73,16 @@ class RepositoryRepository(ABC):
     @abstractmethod
     def delete(self, repository_id: UUID) -> None:
         """Remove um repositório pelo seu identificador único."""
+        ...
+
+    @abstractmethod
+    def delete_by_github_account(
+        self, github_account_id: UUID, user_id: UUID
+    ) -> int:
+        """Remove todos os repositórios de uma conta GitHub do usuário.
+
+        Devolve a quantidade removida. Usado ao desconectar a conta — sem isso
+        os repositórios ficariam órfãos (listados como ativos, sem instalação
+        que os enxergue).
+        """
         ...

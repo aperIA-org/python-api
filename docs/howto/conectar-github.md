@@ -41,6 +41,17 @@ Preencha as 4 variáveis (`GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
 `GITHUB_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`) no `.env` e reinicie a
 API.
 
+Se houver um front-end, preencha também `GITHUB_CONNECT_REDIRECT_URL` — é a
+tela para onde o callback devolve o browser depois da instalação. Em
+desenvolvimento local:
+
+```dotenv
+GITHUB_CONNECT_REDIRECT_URL=http://localhost:3000/dash/repositorios?github=conectado
+```
+
+Sem ela o callback responde JSON e o usuário fica parado no host da API; veja
+[Quando o `state` é inválido ou expirou](#quando-o-state-é-inválido-ou-expirou).
+
 ## 2. Expor o localhost sem domínio (dev)
 
 Em dev, sem HTTPS público, o Webhook URL e o Setup URL do passo 1 precisam de
@@ -99,6 +110,32 @@ Com o App registrado e a API no ar:
 
 Confirme com `GET /github/accounts` (JWT) — deve listar a conta recém-conectada.
 
+### Quando o `state` é inválido ou expirou
+
+O `state` vale **10 minutos**. Se o usuário demorar na tela de instalação do
+GitHub, ou abrir uma URL de callback antiga, o callback não consegue
+identificar quem iniciou o fluxo. Quem chega ali é um browser, não um cliente
+de API, então a resposta depende de `GITHUB_CONNECT_REDIRECT_URL`:
+
+| `GITHUB_CONNECT_REDIRECT_URL` | Sucesso | `state` inválido/expirado |
+|---|---|---|
+| Configurada | `302` para a URL, como configurada | `302` para a mesma URL, com `github=erro&motivo=state` |
+| Vazia | `200 {"status":"connected", ...}` | `400 {"detail":"state invalido ou expirado"}` |
+
+No caso de erro, a query string é **mesclada**, não concatenada: um
+`github=conectado` já presente na URL é substituído por `github=erro`, e os
+demais parâmetros são preservados. Por isso o valor recomendado em
+`.env.example` já traz o marcador de sucesso embutido:
+
+```dotenv
+GITHUB_CONNECT_REDIRECT_URL=http://localhost:3000/dash/repositorios?github=conectado
+```
+
+Com isso a tela do front distingue os dois casos lendo um único parâmetro:
+`github=conectado` (recarrega a lista de repositórios) ou
+`github=erro&motivo=state` (mostra o erro e oferece tentar de novo, chamando
+`GET /github/connect` para gerar um `state` novo).
+
 ## 4. Ativar repositórios
 
 Instalar o App só dá *visibilidade*; o pipeline só roda nos repositórios
@@ -113,7 +150,32 @@ explicitamente **ativados**:
 
    Retorna a lista ao vivo de repositórios de todas as instalações do
    usuário, cada um com `github_account_id`, `github_repo_id`, `full_name`,
-   `url`, `default_branch` e `active` (`true` se já ativado).
+   `url`, `default_branch` e `active` (`true` se já ativado), mais três
+   metadados úteis para montar a tela de ativação:
+
+   | Campo | Tipo | Observação |
+   |---|---|---|
+   | `private` | `bool` | `false` quando o payload da instalação não informa. |
+   | `language` | `str \| null` | Linguagem principal detectada pelo GitHub. |
+   | `pushed_at` | `datetime \| null` | Último push (ISO 8601) — serve para ordenar por atividade. |
+
+   Os três vêm do mesmo payload de `GET /installation/repositories` que a
+   rota já consome: **nenhuma chamada extra ao GitHub**, nenhum custo de
+   rate limit adicional.
+
+   ```json
+   {
+     "github_account_id": "3f1c…",
+     "github_repo_id": 123456789,
+     "full_name": "sua-org/seu-repo",
+     "url": "https://github.com/sua-org/seu-repo",
+     "default_branch": "main",
+     "active": false,
+     "private": true,
+     "language": "Python",
+     "pushed_at": "2024-06-29T16:00:00Z"
+   }
+   ```
 
 2. **Ativar um repositório:**
 
@@ -131,6 +193,13 @@ explicitamente **ativados**:
 
    `github_account_id` precisa pertencer ao usuário logado — caso contrário
    a resposta é `404`. `default_branch` é opcional (default `"main"`).
+
+   > **O POST é um upsert**, não um "criar". A chave é
+   > `(user_id, github_repo_id)`: repetir o POST no mesmo repositório — para
+   > reativar um que você desativou, ou depois de o `full_name` mudar por um
+   > rename no GitHub — **atualiza a linha existente e devolve o mesmo `id`
+   > de antes**, com `active` de volta em `true`. Use o `id` da resposta
+   > direto em `PATCH`/`DELETE`; ele é o da linha que está no banco.
 
 3. **Listar os ativados:**
 
@@ -152,8 +221,49 @@ explicitamente **ativados**:
    ```
 
 A partir do momento em que um repositório está `active=true`, qualquer PR
-aberto ou atualizado nele dispara o pipeline automaticamente — veja
+aberto ou atualizado nele dispara o pipeline automaticamente, e você também
+pode disparar um scan sob demanda com
+`POST /repositories/{id}/scan` — veja
 [disparar-analise.md](./disparar-analise.md).
+
+## 5. Desconectar uma conta GitHub
+
+```bash
+curl -s -X DELETE http://localhost:8000/github/accounts/<account_id> \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Responde `204`, ou `404` se a conta não pertencer ao usuário logado.
+
+**O que some e o que fica.** A remoção acontece em uma única transação:
+
+| Registro | Efeito |
+|---|---|
+| `github_accounts` (a conta) | **Removida.** |
+| `repositories` daquela conta | **Removidos** — todos, ativos ou não. |
+| `findings` | Preservados. |
+| `scan_jobs` (scans) | Preservados. |
+| `scan_reports` (relatórios) | Preservados. |
+
+Os repositórios saem junto porque não existe `ForeignKey` entre as duas
+tabelas: sem essa limpeza explícita eles ficariam **fantasmas** —
+`GET /repositories` continuaria listando-os como ativos, enquanto
+`GET /github/repos` já não os mostraria (a instalação deixou de existir).
+
+O histórico de segurança, ao contrário, é o produto: apagá-lo destruiria
+auditoria por uma ação reversível (você pode reinstalar o App a qualquer
+momento). Ele continua acessível por `GET /findings`, `GET /scans` e
+`GET /scans/{commit_sha}/report`, todos no escopo do seu usuário. O que deixa
+de funcionar são as rotas `GET /repositories/{id}/…`, porque o repositório em
+si não existe mais — passam a responder `404`.
+
+Para reconectar, repita os passos 3 e 4: instalar o App de novo cria uma
+`GithubAccount` nova e você reativa os repositórios com `POST /repositories`.
+Os scans e findings antigos continuam onde estavam.
+
+Se a intenção for só **pausar** a análise sem perder o vínculo, prefira
+`PATCH /repositories/{id}` com `{"active": false}` — o repositório continua
+cadastrado e o histórico segue ligado a ele.
 
 ## Próximos passos
 

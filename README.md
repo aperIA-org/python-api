@@ -78,7 +78,7 @@ Todos os scanners usam `structlog` com campos estruturados. Em particular, `Truf
 ## Arquitetura
 
 ```
-PR/Push → Webhook
+PR (webhook) ou POST /repositories/{id}/scan (manual, sem PR)
   → Tier 1 (≤ 3 min): TruffleHog + Semgrep changed
       └── Gate 1: secret verificado → bloqueia PR + interrompe pipeline
   → Tier 2 (≤ 10 min): Trivy + Semgrep expanded + Prowler (condicional IaC)
@@ -88,6 +88,12 @@ PR/Push → Webhook
       └── Claude Sonnet (attack_path) + Haiku (PR report)
       └── Code suggestions inline para cada finding remediável
 ```
+
+Os dois gatilhos passam pelo mesmo `dispatch_pipeline`
+(`app/application/use_cases/trigger_scan_use_case.py`) e montam o mesmo canvas.
+No scan manual (`pr_number=None`) não há PR onde comentar: o status check no
+commit continua sendo criado, e os relatórios ficam só na API
+(`GET /scans/{commit_sha}/report`).
 
 ### Stack
 
@@ -271,9 +277,10 @@ app/
 | `GET` | `/github/connect` | Gera URL de instalação do App (`state` assinado) (**JWT**) |
 | `GET` | `/github/callback` | Callback pós-instalação; vincula a instalação ao usuário (`state`) |
 | `GET` | `/github/repos` | Lista repositórios visíveis pela instalação (**JWT**) |
-| `GET` `DELETE` | `/github/accounts[/{id}]` | Lista/desconecta contas GitHub conectadas (**JWT**) |
+| `GET` `DELETE` | `/github/accounts[/{id}]` | Lista/desconecta contas GitHub conectadas; o `DELETE` remove junto os repositórios da conta e preserva findings/scans/relatórios (**JWT**) |
 | `POST` `GET` | `/repositories` | Ativa / lista repositórios conectados do usuário (**JWT**) |
 | `GET` `PATCH` `DELETE` | `/repositories/{id}` | Detalhe / ativar-desativar / remover (**JWT**) |
+| `POST` | `/repositories/{id}/scan` | Dispara scan manual no HEAD do branch default, sem PR (**JWT**) |
 | `GET` | `/repositories/{id}/scans\|findings\|reports` | Dados isolados por repositório (**JWT**) |
 | `GET` | `/metrics` | Prometheus metrics (latência, custo Claude, findings) — **ainda não exposto** |
 

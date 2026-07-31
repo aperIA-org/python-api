@@ -13,8 +13,19 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.application.exceptions import (
+    GithubAppNotConfiguredError,
+    GithubResolutionError,
+    RepositoryInactiveError,
+    ScanAlreadyInProgressError,
+)
+from app.application.use_cases.trigger_scan_use_case import (
+    TriggerRepositoryScanUseCase,
+)
+from app.config import settings
 from app.domain.github.entities import Repository
 from app.infrastructure.database.sqlalchemy import get_db
+from app.infrastructure.git.github_client import GitHubClient
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,
 )
@@ -42,6 +53,7 @@ from app.presentation.schemas.repository_schema import (
     RepositoryUpdate,
 )
 from app.presentation.schemas.scan_schema import (
+    ManualScanResponse,
     ScanJobPage,
     ScanJobSummary,
     ScanReportResponse,
@@ -79,6 +91,11 @@ def create_repository(
     A conta GitHub (`github_account_id`) precisa pertencer ao usuário logado;
     caso contrário retorna 404 (sem revelar se a conta existe para outro
     usuário).
+
+    A operação é um **upsert** por `(user_id, github_repo_id)`: reativar um
+    repositório desativado é um POST. A resposta traz o estado REAL persistido
+    — em particular o `id` da linha existente, não o uuid gerado em memória
+    (que não existiria no banco e faria `PATCH`/`DELETE` retornarem 404).
     """
     account = SQLAlchemyGithubAccountRepository(db).get_by_id(payload.github_account_id)
     if account is None or account.user_id != user_id:
@@ -94,9 +111,9 @@ def create_repository(
         default_branch=payload.default_branch,
         active=True,
     )
-    SQLAlchemyRepositoryRepository(db).save(repo)
+    persisted = SQLAlchemyRepositoryRepository(db).save(repo)
     db.commit()
-    return RepositoryResponse.from_entity(repo)
+    return RepositoryResponse.from_entity(persisted)
 
 
 @router.get(
@@ -183,6 +200,96 @@ def _owned_repo_or_404(db: Session, repository_id: UUID, user_id: UUID) -> Repos
     if repo is None or repo.user_id != user_id:
         raise HTTPException(status_code=404, detail="Repositorio nao encontrado")
     return repo
+
+
+@router.post(
+    "/{repository_id}/scan",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ManualScanResponse,
+    summary="Iniciar scan manual do repositório",
+    responses={
+        **_UNAUTHORIZED_RESPONSE,
+        202: {
+            "description": "Pipeline disparado para o HEAD do branch default.",
+            "content": {
+                "application/json": {
+                    "example": {"status": "queued", "commit_sha": "9b2e1f0a", "branch": "main"}
+                }
+            },
+        },
+        404: {"description": "Repositorio nao encontrado."},
+        409: {
+            "description": "Repositorio desativado, ou scan já em andamento para o commit.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "desativado": {
+                            "summary": "Repositório desativado",
+                            "value": {"detail": "Repositorio desativado: reative antes de iniciar um scan."},
+                        },
+                        "em_andamento": {
+                            "summary": "Scan já rodando para o mesmo commit",
+                            "value": {"detail": "Ja existe um scan em andamento para o commit 9b2e1f0a."},
+                        },
+                    }
+                }
+            },
+        },
+        502: {"description": "Falha ao consultar o GitHub para resolver o HEAD do branch."},
+        503: {"description": "GitHub App nao configurado."},
+    },
+)
+def trigger_repository_scan(
+    repository_id: UUID,
+    user_id: UUID = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ManualScanResponse:
+    """Dispara, sob demanda, o **mesmo** pipeline que o webhook de PR dispara.
+
+    O commit analisado é o HEAD do `default_branch` do repositório, resolvido
+    ao vivo no GitHub com o installation token. Como não há PR, o pipeline roda
+    com `pr_number=None`: os relatórios ficam na projeção da API em vez de
+    virarem comentário de PR.
+
+    Contrato de erros:
+
+    - `404` se o repositório não existir **ou** não pertencer ao usuário (nunca
+      403 — não vazamos a existência do recurso).
+    - `409` se o repositório estiver `active=false`. Desativado significa "não
+      analisar": um scan manual aqui seria contraditório, e responder 404
+      esconderia do usuário um repositório que ele mesmo pode reativar via
+      `PATCH /repositories/{id}`. Por isso 409 com mensagem explícita.
+    - `409` se já existir um `ScanJob` em andamento (algum tier `queued`/
+      `running`) para o commit resolvido — evita duplicar o pipeline.
+    - `502` se o GitHub não responder o HEAD do branch.
+    - `503` se o GitHub App não estiver configurado (mesmo espírito do
+      `GET /github/connect`, mas aqui o que falta são as credenciais do App —
+      `GITHUB_APP_ID` / `GITHUB_PRIVATE_KEY_PATH` — necessárias para emitir o
+      installation token).
+    """
+    repo = _owned_repo_or_404(db, repository_id, user_id)
+    use_case = TriggerRepositoryScanUseCase(
+        SQLAlchemyScanJobRepository(db),
+        GitHubClient,
+        github_app_configured=bool(
+            settings.GITHUB_APP_ID and settings.GITHUB_PRIVATE_KEY_PATH
+        ),
+    )
+    try:
+        dispatch = use_case.execute(repo)
+    except RepositoryInactiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ScanAlreadyInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except GithubAppNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except GithubResolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return ManualScanResponse(
+        status=dispatch.status,
+        commit_sha=dispatch.commit_sha,
+        branch=dispatch.branch,
+    )
 
 
 @router.get(

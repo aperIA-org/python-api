@@ -50,13 +50,16 @@ def gate1_check(
     tier1_results: list[list[dict[str, Any]]],
     *,
     repo_full_name: str,
-    pr_number: int,
+    pr_number: int | None,
     commit_sha: str,
     installation_id: int,
 ) -> dict[str, Any]:
     """Avalia o Gate 1 e bloqueia o PR se há secret verificado.
 
     ``tier1_results`` é uma lista de listas (uma por worker T1).
+
+    ``pr_number=None`` (scan manual de branch): o status check no commit
+    continua sendo criado; só o comentário no PR é pulado.
     """
     flattened: list[dict[str, Any]] = [
         item for sub in tier1_results for item in sub
@@ -75,16 +78,17 @@ def gate1_check(
                 state="failure",
                 description="aperIA: secret verificado detectado — PR bloqueado",
             )
-            client.post_pr_comment(
-                repo_full_name=repo_full_name,
-                pr_number=pr_number,
-                body=(
-                    "## 🚨 aperIA — Gate 1 bloqueou este PR\n\n"
-                    "Foi detectada credencial **verificada** no commit. "
-                    "Rote a credencial imediatamente e remova do histórico "
-                    "antes de prosseguir."
-                ),
-            )
+            if pr_number is not None:
+                client.post_pr_comment(
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    body=(
+                        "## 🚨 aperIA — Gate 1 bloqueou este PR\n\n"
+                        "Foi detectada credencial **verificada** no commit. "
+                        "Rote a credencial imediatamente e remova do histórico "
+                        "antes de prosseguir."
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001 — não derrubar pipeline por erro de GitHub
             logger.warning(
                 "gate1_github_post_failed",

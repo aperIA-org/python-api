@@ -39,6 +39,10 @@ class AvailableRepo(BaseModel):
 
     ``active`` indica se já foi ativado para análise pelo usuário.
     ``github_account_id`` é o que o front envia depois em ``POST /repositories``.
+
+    ``private``, ``language`` e ``pushed_at`` são metadados que já vêm no
+    payload de ``GET /installation/repositories`` — expostos aqui para a tela
+    de ativação não precisar de nenhuma chamada extra ao GitHub.
     """
 
     github_account_id: UUID
@@ -47,3 +51,6 @@ class AvailableRepo(BaseModel):
     url: str
     default_branch: str
     active: bool
+    private: bool = False
+    language: str | None = None
+    pushed_at: datetime | None = None

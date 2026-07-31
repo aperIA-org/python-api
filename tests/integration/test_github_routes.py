@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -119,9 +120,45 @@ def test_connect_returns_install_url(client, auth_headers, monkeypatch):
 # --------------------------------------------------------------- /callback
 
 
-def test_callback_invalid_state(client):
+def test_callback_invalid_state(client, monkeypatch):
+    # Sem URL de redirect configurada → 400 JSON (contrato antigo preservado).
+    monkeypatch.setattr(settings, "GITHUB_CONNECT_REDIRECT_URL", "")
     resp = client.get("/github/callback", params={"installation_id": 1, "state": "xxx"})
     assert resp.status_code == 400
+
+
+def test_callback_invalid_state_redirects_with_error(client, monkeypatch):
+    """State inválido + URL configurada → 302 para o front com github=erro."""
+    monkeypatch.setattr(
+        settings,
+        "GITHUB_CONNECT_REDIRECT_URL",
+        "http://localhost:3000/dash/repositorios?github=conectado",
+    )
+    resp = client.get(
+        "/github/callback",
+        params={"installation_id": 1, "state": "xxx"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith("http://localhost:3000/dash/repositorios?")
+    query = dict(parse_qsl(urlsplit(location).query))
+    # github=conectado é substituído, não duplicado.
+    assert query == {"github": "erro", "motivo": "state"}
+
+
+def test_callback_invalid_state_redirect_preserves_other_params(client, monkeypatch):
+    monkeypatch.setattr(
+        settings, "GITHUB_CONNECT_REDIRECT_URL", "http://front/callback?tab=repos"
+    )
+    resp = client.get(
+        "/github/callback",
+        params={"installation_id": 1, "state": "expirado"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    query = dict(parse_qsl(urlsplit(resp.headers["location"]).query))
+    assert query == {"tab": "repos", "github": "erro", "motivo": "state"}
 
 
 def test_callback_links_account(client, user_id, auth_headers, monkeypatch):

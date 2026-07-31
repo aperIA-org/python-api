@@ -1,9 +1,13 @@
 # Como consultar findings, scans e relatórios
 
-Depois que o pipeline roda sobre um PR (veja
+Depois que o pipeline roda sobre um commit (veja
 [disparar-analise.md](./disparar-analise.md)), os resultados ficam
 disponíveis via API, isolados por usuário: cada usuário só vê os próprios
 scans, findings e relatórios.
+
+Vale tanto para scans nascidos de um PR quanto para scans manuais
+(`POST /repositories/{id}/scan`). Nos manuais, aliás, a API é o **único**
+canal de entrega: sem PR, nenhum relatório vira comentário no GitHub.
 
 ## Obter um JWT
 

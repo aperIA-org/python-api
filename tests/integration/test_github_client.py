@@ -104,3 +104,22 @@ def test_get_pr_diff_sends_diff_accept(client):
     client.get_pr_diff("acme/repo", 8)
 
     assert route.calls.last.request.headers["Accept"] == "application/vnd.github.diff"
+
+
+@respx.mock
+def test_get_branch_head_sha(client):
+    respx.get("https://api.github.com/repos/acme/repo/commits/main").mock(
+        return_value=Response(200, json={"sha": "f" * 40, "commit": {}})
+    )
+
+    assert client.get_branch_head_sha("acme/repo", "main") == "f" * 40
+
+
+@respx.mock
+def test_get_branch_head_sha_raises_on_404(client):
+    respx.get("https://api.github.com/repos/acme/repo/commits/sumiu").mock(
+        return_value=Response(404, json={"message": "Not Found"})
+    )
+
+    with pytest.raises(Exception):
+        client.get_branch_head_sha("acme/repo", "sumiu")

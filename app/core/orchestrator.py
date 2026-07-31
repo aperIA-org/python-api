@@ -130,7 +130,7 @@ def build_pipeline_canvas(
     *,
     commit_sha: str,
     repo_url: str,
-    pr_number: int,
+    pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
     repo_path: str,
@@ -143,6 +143,10 @@ def build_pipeline_canvas(
 
     Não dispara — apenas retorna o canvas. O caller usa
     ``canvas.delay()`` ou ``canvas.apply_async()`` para iniciar.
+
+    ``pr_number=None`` é um scan de branch (manual): o canvas é idêntico, só
+    não há PR onde comentar — os workers de report pulam o post e mantêm o
+    relatório apenas na projeção consumível via API.
     """
     tier1_group = group(
         tier1_scan_worker.run_trufflehog.s(
@@ -272,7 +276,7 @@ def start_pipeline(
     *,
     commit_sha: str,
     repo_url: str,
-    pr_number: int,
+    pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
     repo_path: str,

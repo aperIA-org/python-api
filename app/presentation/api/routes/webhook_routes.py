@@ -6,6 +6,7 @@ import hmac
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 
+from app.application.use_cases.trigger_scan_use_case import dispatch_pipeline
 from app.config import settings
 
 router = APIRouter()
@@ -170,10 +171,6 @@ async def github_webhook(request: Request) -> dict:
         # Atribui o scan ao dono (repo cadastrado + ativo). Órfão se não achar.
         user_id, repository_id = _resolve_owner(installation_id, github_repo_id)
 
-        # Import tardio para evitar criar a app Celery durante o tempo
-        # de carregamento dos testes do webhook.
-        from app.core.orchestrator import start_pipeline
-
         logger.info(
             "webhook_pr_received",
             commit_sha=commit_sha,
@@ -182,22 +179,15 @@ async def github_webhook(request: Request) -> dict:
             owned=bool(user_id),
         )
 
-        # Para o MVP, o repo_path/changed_files virão de uma task de
-        # checkout no início do pipeline (pós-MVP). No estado atual:
-        # - repo_path: stub (scanners run_safe → [] sem path real)
-        # - changed_files: lista vazia (Semgrep T1 vira no-op rápido)
-        # - target_url: vem de configuração do repo ou None (ZAP skipa)
-        start_pipeline(
+        # Mesmo ponto de disparo do scan manual (`POST /repositories/{id}/scan`)
+        # — os argumentos "de MVP" do canvas vivem lá, não aqui.
+        dispatch_pipeline(
             commit_sha=commit_sha,
             repo_url=repo_url,
-            pr_number=pr_number,
-            installation_id=installation_id,
             repo_full_name=repo_full_name,
-            repo_path=f"/tmp/aperia/{commit_sha[:12]}",
+            installation_id=installation_id,
+            pr_number=pr_number,
             base_sha=base_sha,
-            head_sha=commit_sha,
-            changed_files=[],
-            target_url=None,
             user_id=user_id,
             repository_id=repository_id,
         )

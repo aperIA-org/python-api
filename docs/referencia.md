@@ -6,7 +6,7 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 
 ## 1. Rotas da API
 
-23 rotas HTTP registradas em `app/main.py`, agrupadas em 8 tags. `Auth` indica exigência de `Authorization: Bearer <access_token>` (JWT); rotas sem essa exigência estão marcadas "—". O webhook usa um esquema de autenticação próprio (HMAC), não JWT.
+27 rotas HTTP registradas em `app/main.py`, agrupadas em 8 tags. `Auth` indica exigência de `Authorization: Bearer <access_token>` (JWT); rotas sem essa exigência estão marcadas "—". O webhook usa um esquema de autenticação próprio (HMAC), não JWT.
 
 | Método | Caminho | Descrição | Auth |
 |---|---|---|---|
@@ -23,15 +23,16 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 | `GET` | `/scans/{commit_sha}/report` | Relatórios (um por tier) de um commit. Lista vazia se o pipeline ainda não gerou nenhum. | JWT |
 | `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório de um tier específico (1-3) de um commit. | JWT |
 | `GET` | `/github/connect` | Gera `install_url` do GitHub App com `state` assinado (10 min). Retorna 503 se `GITHUB_APP_SLUG` vazio. | JWT |
-| `GET` | `/github/callback` | Recebe o redirect pós-instalação (`installation_id` + `state` + `setup_action`); vincula a instalação ao usuário via `state` assinado (não via header). Upsert de `GithubAccount`. | — |
-| `GET` | `/github/repos` | Lista, ao vivo, os repositórios visíveis pelas instalações do usuário; marca `active` nos já ativados. | JWT |
+| `GET` | `/github/callback` | Recebe o redirect pós-instalação (`installation_id` + `state` + `setup_action`); vincula a instalação ao usuário via `state` assinado (não via header). Upsert de `GithubAccount`. Com `GITHUB_CONNECT_REDIRECT_URL` configurada responde `302` (inclusive em erro de `state`, com `github=erro&motivo=state`); sem ela, JSON no sucesso e `400` no erro. | — |
+| `GET` | `/github/repos` | Lista, ao vivo, os repositórios visíveis pelas instalações do usuário; marca `active` nos já ativados. Traz também `private`, `language` e `pushed_at`, lidos do próprio payload da instalação. | JWT |
 | `GET` | `/github/accounts` | Lista as contas GitHub (instalações) conectadas pelo usuário. | JWT |
-| `DELETE` | `/github/accounts/{account_id}` | Desconecta uma conta GitHub. 404 se não pertencer ao usuário. | JWT |
+| `DELETE` | `/github/accounts/{account_id}` | Desconecta uma conta GitHub **e remove, na mesma transação, os `repositories` vinculados a ela**. Findings, scans e relatórios são preservados. 404 se não pertencer ao usuário. | JWT |
 | `GET` | `/repositories` | Lista repositórios ativados para análise pelo usuário. | JWT |
-| `POST` | `/repositories` | Ativa um repositório, vinculado a uma `github_account_id` do usuário. 404 se a conta não pertencer a ele. | JWT |
+| `POST` | `/repositories` | Ativa um repositório, vinculado a uma `github_account_id` do usuário. **Upsert** por `(user_id, github_repo_id)`: reativar devolve o `id` da linha já existente, não um novo. 404 se a conta não pertencer ao usuário. | JWT |
 | `GET` | `/repositories/{repository_id}` | Detalhe de um repositório. 404 se não pertencer ao usuário. | JWT |
 | `PATCH` | `/repositories/{repository_id}` | Ativa/desativa um repositório (`active`). 404 se não pertencer ao usuário. | JWT |
 | `DELETE` | `/repositories/{repository_id}` | Remove o vínculo do repositório. 404 se não pertencer ao usuário. | JWT |
+| `POST` | `/repositories/{repository_id}/scan` | Dispara um scan manual no HEAD do `default_branch` — mesmo pipeline do webhook, com `pr_number=None`. `202` com `{"status","commit_sha","branch"}`; `409` se desativado ou se já há scan em andamento no commit; `502` se o GitHub não resolver o HEAD; `503` sem credenciais do App. | JWT |
 | `GET` | `/repositories/{repository_id}/scans` | Lista scans (`ScanJob`) do repositório, paginados. | JWT |
 | `GET` | `/repositories/{repository_id}/findings` | Lista findings do repositório (todos os commits), com filtros. | JWT |
 | `GET` | `/repositories/{repository_id}/reports` | Lista relatórios (por commit/tier) do repositório. | JWT |
@@ -48,11 +49,11 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `SECRET_KEY` | `change-this-secret-key-with-at-least-32-characters` | Assinatura dos JWT (access token e `state` do GitHub connect) — trocar em produção. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Duração do access token. |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Duração do refresh token. |
-| `GITHUB_APP_ID` | `""` | Autenticação do GitHub App (JWT do App). |
-| `GITHUB_PRIVATE_KEY_PATH` | `""` | Caminho do `.pem` da chave privada do App. |
+| `GITHUB_APP_ID` | `""` | Autenticação do GitHub App (JWT do App). Junto com `GITHUB_PRIVATE_KEY_PATH`, é o par exigido pelo `POST /repositories/{id}/scan` — vazio → rota responde 503. |
+| `GITHUB_PRIVATE_KEY_PATH` | `""` | Caminho do `.pem` da chave privada do App. Ver `GITHUB_APP_ID`. |
 | `GITHUB_WEBHOOK_SECRET` | `""` | HMAC do `POST /webhook/github` (vazio = assina com chave vazia). |
 | `GITHUB_APP_SLUG` | `""` | Monta `install_url` em `GET /github/connect`; vazio → rota responde 503. |
-| `GITHUB_CONNECT_REDIRECT_URL` | `""` | Destino do redirect do `GET /github/callback` para o front-end; vazio → callback responde JSON em vez de `302`. |
+| `GITHUB_CONNECT_REDIRECT_URL` | `""` | Tela do front-end que recebe o retorno da instalação (ex.: `http://localhost:3000/dash/repositorios?github=conectado`). No sucesso o `GET /github/callback` redireciona (`302`) para a URL exatamente como configurada; num `state` inválido/expirado redireciona para a mesma URL com `github=erro&motivo=state` (substitui `github=conectado`, preserva os demais parâmetros). Vazio → callback responde JSON no sucesso e `400` no erro, sem `302`. |
 | `ANTHROPIC_API_KEY` | `""` | Chamadas ao Claude nos tiers 2/3; sem ela a análise roda em modo degradado. |
 | `CLAUDE_MODEL_REASONING` | `claude-sonnet-4-6` | Modelo usado em `tier2_analyze`/`tier3_deep_analysis` (raciocínio). |
 | `CLAUDE_MODEL_FORMATTING` | `claude-haiku-4-5-20251001` | Modelo usado nos workers de `reporting` (markdown). |
@@ -114,7 +115,7 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `commit_sha` | `str` | Chave de busca do scan. |
 | `repo_url` | `str` | URL do repositório. |
 | `installation_id` | `int` | Instalação do GitHub App que originou o evento. |
-| `pr_number` | `int \| None` | Número do PR. |
+| `pr_number` | `int \| None` | Número do PR. `None` em scan manual (`POST /repositories/{id}/scan`) — o pipeline é o mesmo, mas os workers de reporting não comentam em PR nenhum (o status check no commit continua sendo criado). |
 | `repo_full_name` | `str \| None` | `org/repo`. |
 | `tier1_status` / `tier2_status` / `tier3_status` | `TierStatus \| None` | Status por tier. |
 | `tier1_started_at` / `tier1_completed_at` (idem tier2/tier3) | `datetime \| None` | Timestamps de início/fim por tier. |
@@ -144,7 +145,9 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `active` | `bool` | Default `True`; controla se o repo está sob análise. |
 | `created_at` | `datetime` | `default_factory=datetime.utcnow`. |
 
-**UNIQUE:** `repositories_user_repo_key` em `(user_id, github_repo_id)`.
+**UNIQUE:** `repositories_user_repo_key` em `(user_id, github_repo_id)` — é a chave do upsert de `POST /repositories`. O `save()` usa `RETURNING`, então a rota devolve a linha realmente persistida (com o `id` original em caso de conflito), e não o `uuid4()` gerado em memória.
+
+Não há `ForeignKey` para `github_accounts`: quando uma conta é desconectada (`DELETE /github/accounts/{id}`), a limpeza dos repositórios dela é explícita, feita na mesma transação.
 
 ### `GithubAccount` (`app/domain/github/entities.py`) — tabela `github_accounts`
 

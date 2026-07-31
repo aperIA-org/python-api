@@ -1,8 +1,16 @@
 # Como disparar uma análise
 
-Existem duas formas de disparar o pipeline de segurança do aperIA: um PR real
-num repositório conectado, ou uma simulação local via webhook assinado. Use a
-receita (B) para validar o pipeline sem depender do GitHub App.
+Existem três formas de disparar o pipeline de segurança do aperIA:
+
+| Receita | Quando usar | Precisa de PR? | Precisa do GitHub App? |
+|---|---|---|---|
+| **A — PR real** | Fluxo normal de trabalho | Sim | Sim |
+| **B — Scan manual via API** | Analisar o branch default agora, sem abrir PR | Não | Sim |
+| **C — Webhook simulado** | Validar o pipeline localmente | Não | Não |
+
+O pipeline é **o mesmo** nas três: mesmo canvas Celery, mesmos tiers, mesmos
+gates. A única diferença é a origem do commit analisado e, sem PR, o fato de
+não haver onde postar comentários.
 
 ## Receita A — Via PR real num repositório conectado
 
@@ -20,7 +28,73 @@ normalmente no GitHub:
 
 Para acompanhar o resultado, veja [consumir-resultados.md](./consumir-resultados.md).
 
-## Receita B — Simulação local via webhook assinado
+## Receita B — Scan manual via API (sem PR)
+
+Use quando quiser analisar o estado atual de um repositório sem esperar por um
+PR: uma primeira varredura logo depois de ativar o repositório, uma reanálise
+depois de um merge, ou um botão "Analisar agora" no front-end.
+
+Pré-requisitos: o repositório já ativado (`POST /repositories`, veja
+[conectar-github.md](./conectar-github.md)), com `active=true`, e as
+credenciais do App (`GITHUB_APP_ID` e `GITHUB_PRIVATE_KEY_PATH`) configuradas
+— é com elas que a API emite o installation token para resolver o commit.
+
+### 1. Dispare
+
+```bash
+curl -sS -X POST http://localhost:8000/repositories/<repository_id>/scan \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+O `<repository_id>` é o `id` devolvido por `GET /repositories` (ou pelo
+próprio `POST /repositories`). Não há corpo de requisição: o alvo é sempre o
+HEAD do `default_branch` do repositório, resolvido ao vivo no GitHub.
+
+### 2. Confirme a resposta
+
+```json
+{"status":"queued","commit_sha":"c3f9a1b8d2e40567890abcdef1234567890abcde","branch":"main"}
+```
+
+`202 Accepted` — o canvas foi montado e disparado de forma assíncrona.
+`commit_sha` é o SHA completo (40 hex) que o GitHub resolveu para o HEAD do
+branch; use-o direto nas rotas de leitura
+(`GET /scans/{commit_sha}`, `GET /scans/{commit_sha}/report`).
+
+### 3. Códigos de erro
+
+| Código | Quando | O que fazer |
+|---|---|---|
+| `404` | O repositório não existe **ou** pertence a outro usuário | Confira o `id` em `GET /repositories`. O 404 cobre os dois casos de propósito — a API não confirma a existência de recursos de terceiros. |
+| `409` | Repositório com `active=false` | Reative com `PATCH /repositories/{id}` `{"active": true}` (ou repetindo o `POST /repositories`) e tente de novo. |
+| `409` | Já existe um scan `queued`/`running` para aquele commit | Espere terminar — o HEAD não mudou, um segundo pipeline no mesmo commit seria trabalho duplicado. Acompanhe com `GET /scans/{commit_sha}`. |
+| `502` | O GitHub não respondeu o HEAD do branch | Verifique se o App ainda está instalado e se enxerga o repositório (`GET /github/repos`), e se o `default_branch` cadastrado existe de fato. |
+| `503` | `GITHUB_APP_ID` ou `GITHUB_PRIVATE_KEY_PATH` vazios | Complete o registro do App — passo 1 de [conectar-github.md](./conectar-github.md). |
+
+Os dois `409` se distinguem pelo `detail` da resposta:
+
+```json
+{"detail":"Repositorio desativado: reative antes de iniciar um scan."}
+{"detail":"Ja existe um scan em andamento para o commit c3f9a1b8…."}
+```
+
+### 4. O que muda por não haver PR
+
+O scan manual roda com `pr_number = None`. Consequências, todas visíveis no
+resultado:
+
+- **Nenhum comentário é postado no GitHub.** Nem o aviso de bloqueio do Gate 1,
+  nem os relatórios de Tier 2 e Tier 3. Os workers de reporting detectam a
+  ausência de PR e pulam o post (log `tier2_report_sem_pr` /
+  `tier3_report_sem_pr`).
+- **O status check no commit continua sendo criado.** O Gate 1 marca o commit
+  como `failure` quando encontra secret verificado, exatamente como faria num
+  PR.
+- **Os relatórios continuam sendo gerados e persistidos**, disponíveis em
+  `GET /scans/{commit_sha}/report` e `GET /repositories/{id}/reports`. A
+  entrega muda de canal, não de conteúdo.
+
+## Receita C — Simulação local via webhook assinado
 
 Use esta receita para disparar o pipeline sem um PR real, assinando o payload
 manualmente com HMAC.

@@ -24,10 +24,11 @@ Receitas orientadas a objetivo (assumem que você já conhece o básico):
 - **[Como subir a stack](howto/subir-a-stack.md)** — containers base, camadas
   opcionais (scanners/observabilidade), migrations e gotchas.
 - **[Como conectar uma conta GitHub](howto/conectar-github.md)** — registrar o
-  GitHub App, expor o localhost sem domínio (ngrok), conectar a conta e ativar
-  repositórios.
+  GitHub App, expor o localhost sem domínio (ngrok), conectar a conta, ativar
+  repositórios e desconectar.
 - **[Como disparar uma análise](howto/disparar-analise.md)** — via PR real num
-  repositório conectado ou via webhook simulado local.
+  repositório conectado, via scan manual pela API (sem PR) ou via webhook
+  simulado local.
 - **[Como consultar findings, scans e relatórios](howto/consumir-resultados.md)**
   — obter um JWT e consumir os dados, isolados por usuário.
 - **[Como rodar os testes](howto/rodar-testes.md)** — suíte, cobertura e execução

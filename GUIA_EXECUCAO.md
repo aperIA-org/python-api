@@ -18,7 +18,7 @@ local, sem precisar de chaves nem domínio:
 | Aprender rodando do zero | [Tutorial — primeiro scan](docs/tutorial-primeiro-scan.md) |
 | Subir a stack (Docker, migrations, camadas) | [How-to — subir a stack](docs/howto/subir-a-stack.md) |
 | Conectar o GitHub e ativar repositórios | [How-to — conectar GitHub](docs/howto/conectar-github.md) |
-| Disparar uma análise (PR real ou simulada) | [How-to — disparar análise](docs/howto/disparar-analise.md) |
+| Disparar uma análise (PR real, scan manual ou simulada) | [How-to — disparar análise](docs/howto/disparar-analise.md) |
 | Consultar findings / scans / relatórios | [How-to — consumir resultados](docs/howto/consumir-resultados.md) |
 | Rodar os testes | [How-to — rodar os testes](docs/howto/rodar-testes.md) |
 | Consultar rotas, variáveis, modelos de dados | [Referência](docs/referencia.md) |

@@ -57,8 +57,30 @@ não impede que Tier 1/Tier 2 continuem respondendo PRs.
 
 O pipeline inteiro é montado como uma única `celery.chain` em
 `app/core/orchestrator.py:build_pipeline_canvas`, disparada por
-`start_pipeline` a partir do webhook. A ideia central é que cada elo da
-chain é o resultado de uma task anterior — Celery passa esse resultado como
+`start_pipeline`. Há **dois gatilhos** para essa mesma chain — o webhook de
+PR (`POST /webhook/github`) e o scan manual
+(`POST /repositories/{id}/scan`) — mas um **único ponto de disparo**:
+`dispatch_pipeline`, em
+`app/application/use_cases/trigger_scan_use_case.py`. Os dois caminhos
+chamam essa função, o que é uma decisão deliberada: os argumentos ainda
+provisórios do MVP (o `repo_path` stub, o `changed_files` vazio, o
+`target_url` ausente) ficam definidos em um lugar só, e nenhum dos gatilhos
+tem como divergir do outro. O que o scan manual acrescenta — e o webhook
+recebe de graça no payload do GitHub — é o commit a analisar: sem PR, o use
+case resolve ao vivo o HEAD do `default_branch` e verifica que ainda não há
+um scan em andamento para aquele SHA.
+
+A única diferença real entre os dois gatilhos é o `pr_number`, que no scan
+manual é `None`. Isso não altera o canvas: os mesmos tiers rodam, os mesmos
+gates decidem, os relatórios são gerados e persistidos igual. O que muda é
+só o **canal de entrega** — sem PR não há onde comentar, então os workers de
+reporting pulam o post e o relatório fica apenas na projeção consumível pela
+API. O status check no commit, esse continua sendo criado pelo Gate 1: ele
+se prende ao SHA, não ao PR. É a tradução, no nível do código, de que
+"analisar" e "avisar no GitHub" são responsabilidades separadas.
+
+A ideia central da chain é que cada elo
+é o resultado de uma task anterior — Celery passa esse resultado como
 **primeiro argumento posicional** da próxima task da chain (`.s(kw=...)`
 serve só para argumentos fixos, como `commit_sha`/`repo_full_name`, que não
 vêm do elo anterior).
@@ -289,6 +311,24 @@ menos acoplamento rígido de schema) com uma contrapartida clara: a
 integridade referencial depende inteiramente da disciplina do código
 de aplicação, não do banco.
 
+A conta de pagar por essa escolha aparece inteira no `DELETE
+/github/accounts/{id}`. Como não há `ON DELETE CASCADE` entre
+`github_accounts` e `repositories`, desconectar uma conta sem limpeza
+explícita deixava para trás **repositórios fantasmas**: `GET /repositories`
+continuava listando-os como ativos, enquanto `GET /github/repos` já não os
+enxergava — a instalação que os revelava tinha deixado de existir. A rota
+hoje remove os dois na mesma transação. O interessante é onde a cascata
+**para**: findings, scans e relatórios sobrevivem, de propósito. O critério
+não é "o que depende do quê" no sentido do schema, mas o que é configuração
+e o que é produto. O vínculo com o GitHub é configuração, refazível em dois
+cliques (o usuário pode reinstalar o App a qualquer momento). O histórico de
+segurança já coletado é o produto — apagá-lo destruiria auditoria por conta
+de uma ação reversível, e uma remoção acidental viraria perda permanente. O
+efeito colateral aceito é que os scans preservados guardam um
+`repository_id` que não resolve mais para linha nenhuma; isso não quebra as
+leituras, porque o isolamento por usuário se apoia em `scan_jobs.user_id`,
+não no repositório.
+
 O ponto de decisão de quem é o dono de um scan é o próprio webhook. Quando um
 evento `pull_request` chega, o aperIA já sabe `installation_id` (do payload
 do GitHub App) e o id do repositório GitHub; ele resolve o dono buscando, na
@@ -305,6 +345,19 @@ relatórios normalmente — eles só não aparecem para nenhum usuário nas rota
 `GET /findings`, `/scans`, etc., porque toda leitura filtra pelo dono. Esse
 comportamento é deliberadamente best-effort, na mesma linha do §5: resolver o
 dono é enriquecimento, não pré-condição para o pipeline funcionar.
+
+O scan manual inverte essa ordem, e por um motivo simples: ali o dono é o
+ponto de partida, não uma dedução. `POST /repositories/{id}/scan` só chega ao
+disparo depois de o JWT provar quem é o usuário e de o repositório ser
+confirmado como dele — o `user_id`/`repository_id` do scan vêm direto da
+linha de `repositories`, sem lookup por `(installation_id, github_repo_id)`.
+Um scan manual, portanto, nunca nasce órfão. E é justamente por o dono ser
+pré-condição que a rota pode se dar ao luxo de recusar casos que o webhook
+tolera: um repositório desativado responde `409` em vez de rodar assim mesmo.
+As duas posturas são coerentes entre si — o webhook reage a um evento externo
+que ele não controla e prefere analisar demais a analisar de menos; a rota
+manual atende a um pedido explícito, e um pedido explícito pode ser
+respondido com um "não, e aqui está o porquê".
 
 Uma consequência direta desse modelo é a escolha de devolver **404, não
 403**, quando um usuário autenticado pede um recurso que existe mas pertence
@@ -335,3 +388,16 @@ conta GitHub do atacante acabaria vinculada à sessão da vítima, ou vice-versa
 Ao exigir que o `state` seja válido, não expirado e carregue explicitamente
 o `user_id` esperado, o callback só aceita completar o vínculo para quem de
 fato originou aquele fluxo específico.
+
+Vale separar essa checagem da forma como a recusa é comunicada. Quando
+`GITHUB_CONNECT_REDIRECT_URL` está configurada, um `state` inválido ou
+expirado não devolve mais um `400` em JSON: redireciona para o front com
+`github=erro&motivo=state`. Isso não afrouxa nada — a validação é a mesma, o
+vínculo continua não sendo criado. É só o reconhecimento de que quem chega ao
+callback é um **browser**, não um cliente de API: despejar um JSON de erro no
+host da API deixaria o usuário numa página morta, longe da aplicação, sem
+caminho de volta. Devolvendo-o à própria tela que iniciou o fluxo, o erro mais
+provável (o `state` de 10 minutos que expirou enquanto a pessoa escolhia
+repositórios no GitHub) se resolve com um clique em "tentar de novo", que
+chama `/github/connect` e gera um `state` novo. O `400` continua existindo
+para quando não há URL configurada — aí não há front para onde voltar.

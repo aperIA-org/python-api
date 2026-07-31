@@ -181,6 +181,19 @@ class TestGate1:
         ).get()
         assert len(result["findings"]) == 3
 
+    def test_gate1_sem_pr_number_cria_status_check_mas_nao_comenta(self, mock_github):
+        """Scan manual: o status check é no commit (existe), o comentário não."""
+        ar = analysis_worker.gate1_check.delay(
+            [[{"secret_verified": True, "source": "trufflehog"}]],
+            repo_full_name="acme/repo",
+            pr_number=None,
+            commit_sha="a" * 40,
+            installation_id=42,
+        )
+        assert ar.state == "IGNORED"
+        mock_github.create_status_check.assert_called_once()
+        mock_github.post_pr_comment.assert_not_called()
+
     def test_gate1_blocks_even_when_github_post_fails(self, mock_github):
         mock_github.create_status_check.side_effect = RuntimeError("403")
         ar = analysis_worker.gate1_check.delay(
@@ -404,6 +417,29 @@ class TestReportingWorker:
         ).get()
         assert result["_post_meta"]["posted"] is False
         assert "403" in result["_post_meta"]["error"]
+
+    def test_sem_pr_number_nao_comenta_no_github(
+        self, patched_reporting_claude, patched_reporting_github
+    ):
+        """Scan manual (de branch): não há PR — o post é pulado, não tentado."""
+        patched_reporting_claude.call.return_value = MagicMock(text="## Report")
+        result = reporting_worker.post_tier2_report.delay(
+            {
+                "degraded": False,
+                "risk_score": {"score": 50, "level": "medium"},
+                "event_chain": [],
+                "business_impact": {},
+                "attack_narrative": "",
+                "cti_status": "unavailable",
+                "caldera_status": "unavailable",
+            },
+            repo_full_name="acme/repo",
+            pr_number=None,
+            commit_sha="a" * 40,
+            installation_id=42,
+        ).get()
+        assert result["_post_meta"] == {"posted": False, "reason": "sem_pr"}
+        patched_reporting_github.post_pr_comment.assert_not_called()
 
 
 # -----------------------------------------------------------------------------

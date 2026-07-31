@@ -10,6 +10,7 @@ Fluxo:
 
 from __future__ import annotations
 
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 import structlog
@@ -51,6 +52,20 @@ _UNAUTHORIZED_RESPONSE = {
 router = APIRouter(prefix="/github", tags=["github"])
 
 
+def _com_query(base_url: str, **params: str) -> str:
+    """Mescla ``params`` na query string de ``base_url``.
+
+    A URL configurada em ``GITHUB_CONNECT_REDIRECT_URL`` já costuma trazer
+    query (ex.: ``/dash/repositorios?github=conectado``), então concatenar
+    ``?...`` produziria URL inválida — usamos ``urllib.parse`` e sobrescrevemos
+    as chaves informadas (``github=conectado`` vira ``github=erro``).
+    """
+    parts = urlsplit(base_url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(params)
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
 @router.get(
     "/connect",
     response_model=ConnectResponse,
@@ -80,7 +95,15 @@ def connect(user_id=Depends(get_current_user)) -> ConnectResponse:
 @router.get(
     "/callback",
     summary="Callback da instalação do GitHub App",
-    responses={400: {"description": "state ausente ou inválido."}},
+    responses={
+        302: {
+            "description": (
+                "Redirect para `GITHUB_CONNECT_REDIRECT_URL` quando configurada. "
+                "Em erro de `state`, com `github=erro&motivo=state` na query."
+            )
+        },
+        400: {"description": "state ausente ou inválido (sem URL de redirect configurada)."},
+    },
 )
 def callback(
     installation_id: int = Query(...),
@@ -92,10 +115,24 @@ def callback(
 
     A identidade vem do `state` assinado (não do header JWT — é o browser do
     usuário que chega aqui). Faz upsert da `GithubAccount`.
+
+    Quem chega aqui é um **browser**, não um cliente de API: com
+    `GITHUB_CONNECT_REDIRECT_URL` configurada, um `state` inválido/expirado
+    também redireciona (302) para o front, com `github=erro&motivo=state`, em
+    vez de deixar o usuário num JSON de erro no host da API. Sem a URL
+    configurada mantemos o `400`.
     """
     try:
         user_id = decode_connect_state(state, settings.SECRET_KEY)
     except ValueError as exc:
+        if settings.GITHUB_CONNECT_REDIRECT_URL:
+            logger.warning("github_callback_state_invalido", installation_id=installation_id)
+            return RedirectResponse(
+                url=_com_query(
+                    settings.GITHUB_CONNECT_REDIRECT_URL, github="erro", motivo="state"
+                ),
+                status_code=302,
+            )
         raise HTTPException(status_code=400, detail="state invalido ou expirado") from exc
 
     # Metadados da instalação (login/tipo) — best-effort.
@@ -166,6 +203,11 @@ def list_available_repos(
                     url=r.get("html_url", ""),
                     default_branch=r.get("default_branch", "main"),
                     active=r["id"] in active_ids,
+                    # Metadados opcionais do payload da instalação — ``.get()``
+                    # porque nem todo payload (nem os fakes de teste) os traz.
+                    private=bool(r.get("private", False)),
+                    language=r.get("language"),
+                    pushed_at=r.get("pushed_at"),
                 )
             )
     return out
@@ -192,10 +234,34 @@ def list_accounts(user_id=Depends(get_current_user), db: Session = Depends(get_d
     responses={**_UNAUTHORIZED_RESPONSE, 404: {"description": "Conta nao encontrada."}},
 )
 def delete_account(account_id: UUID, user_id=Depends(get_current_user), db: Session = Depends(get_db)):
-    """Remove o vínculo da conta GitHub. 404 se não pertencer ao usuário."""
+    """Remove o vínculo da conta GitHub. 404 se não pertencer ao usuário.
+
+    Remove **na mesma transação** os `repositories` vinculados a essa conta.
+    Não existe `ForeignKey` entre `github_accounts` e `repositories`, então a
+    limpeza é explícita: sem ela os repositórios ficariam fantasmas —
+    `GET /repositories` os listaria como ativos enquanto `GET /github/repos`
+    não os mostraria mais (a instalação deixou de existir).
+
+    **Findings, scans e relatórios são preservados.** O histórico de segurança
+    já coletado é o produto: apagá-lo ao desconectar destruiria auditoria por
+    uma ação reversível (o usuário pode reinstalar o App). Esses registros
+    continuam acessíveis por `GET /findings` e `GET /scans` (escopo do
+    usuário); apenas as rotas `/repositories/{id}/…` deixam de resolver,
+    porque o vínculo com o repositório desapareceu.
+    """
     repo = SQLAlchemyGithubAccountRepository(db)
     account = repo.get_by_id(account_id)
     if account is None or account.user_id != user_id:
         raise HTTPException(status_code=404, detail="Conta nao encontrada")
+
+    removidos = SQLAlchemyRepositoryRepository(db).delete_by_github_account(
+        account_id, user_id
+    )
     repo.delete(account_id)
     db.commit()
+    logger.info(
+        "github_account_disconnected",
+        user_id=str(user_id),
+        account_id=str(account_id),
+        repositories_removed=removidos,
+    )

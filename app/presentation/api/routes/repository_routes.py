@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import structlog
+
+from app.core.exceptions import ScanDispatchError
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -59,6 +63,8 @@ from app.presentation.schemas.scan_schema import (
     ScanReportResponse,
 )
 
+logger = structlog.get_logger()
+
 _UNAUTHORIZED_RESPONSE = {
     401: {
         "description": "Token ausente, invalido ou expirado.",
@@ -96,6 +102,13 @@ def create_repository(
     repositório desativado é um POST. A resposta traz o estado REAL persistido
     — em particular o `id` da linha existente, não o uuid gerado em memória
     (que não existiria no banco e faria `PATCH`/`DELETE` retornarem 404).
+
+    `target_url` (opcional) é a URL onde a aplicação está publicada e vira o
+    alvo do DAST no Tier 3. Ela passa pela validação anti-SSRF descrita em
+    `PATCH /repositories/{id}` — URL malformada ou apontando para rede interna
+    responde `422`. Por ser upsert, **omitir o campo preserva** a URL já
+    gravada (senão um POST de reativação apagaria o alvo sem ninguém pedir);
+    limpar é operação explícita do `PATCH` com `null`.
     """
     account = SQLAlchemyGithubAccountRepository(db).get_by_id(payload.github_account_id)
     if account is None or account.user_id != user_id:
@@ -110,6 +123,7 @@ def create_repository(
         url=payload.url,
         default_branch=payload.default_branch,
         active=True,
+        target_url=payload.target_url,
     )
     persisted = SQLAlchemyRepositoryRepository(db).save(repo)
     db.commit()
@@ -151,8 +165,47 @@ def get_repository(
 @router.patch(
     "/{repository_id}",
     response_model=RepositoryResponse,
-    summary="Ativar/desativar repositório",
-    responses={**_UNAUTHORIZED_RESPONSE, 404: {"description": "Repositorio nao encontrado."}},
+    summary="Atualizar repositório (ativação e/ou alvo de DAST)",
+    responses={
+        **_UNAUTHORIZED_RESPONSE,
+        404: {"description": "Repositorio nao encontrado."},
+        422: {
+            "description": "Payload invalido (nenhum campo, `active: null` ou `target_url` recusada).",
+            "content": {
+                "application/json": {
+                    # Mantém o schema padrão do FastAPI: sobrescrever a resposta
+                    # 422 só para acrescentar exemplos apagaria o $ref.
+                    "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
+                    "examples": {
+                        "alvo_bloqueado": {
+                            "summary": "URL aponta para a rede interna",
+                            "value": {
+                                "detail": [
+                                    {
+                                        "type": "target_url_alvo_bloqueado",
+                                        "loc": ["body", "target_url"],
+                                        "msg": "Alvo bloqueado: 169.254.169.254 aponta para a rede interna. Informe a URL publica do ambiente de staging/preview.",
+                                    }
+                                ]
+                            },
+                        },
+                        "esquema_invalido": {
+                            "summary": "Esquema fora de http/https",
+                            "value": {
+                                "detail": [
+                                    {
+                                        "type": "target_url_esquema_invalido",
+                                        "loc": ["body", "target_url"],
+                                        "msg": "Esquema 'file' nao e aceito: use http:// ou https://.",
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    },
 )
 def update_repository(
     repository_id: UUID,
@@ -160,13 +213,65 @@ def update_repository(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> RepositoryResponse:
-    """Ativa ou desativa um repositório. 404 se não pertencer ao usuário."""
+    """Atualização **parcial**: aplica só os campos presentes no corpo.
+
+    `404` se o repositório não existir ou não pertencer ao usuário (nunca 403).
+
+    Semântica do corpo — `active` e `target_url` são independentes:
+
+    - campo ausente → não é tocado;
+    - `{"active": false}` → desativa (contrato inalterado, é o que o
+      front-end já envia);
+    - `{"target_url": "https://staging.acme.com"}` → define o alvo do DAST;
+    - `{"target_url": null}` → **limpa** o alvo (o Tier 3 volta a pular o ZAP).
+
+    `null` em `target_url` é valor legítimo, não omissão — por isso a rota
+    decide por presença da chave (`model_fields_set`), não por "veio `None`".
+    Corpo vazio e `{"active": null}` são `422` explícitos, para que um erro de
+    cliente não passe como no-op silencioso.
+
+    ## Por que `target_url` é validada com uma blocklist de rede
+
+    O `target_url` não é um link exibido na UI: ele é entregue ao OWASP ZAP,
+    que faz spider e **active scan** — dispara payloads reais de SQLi, XSS e
+    path traversal contra tudo que encontrar. Aceitar URL arbitrária tem duas
+    consequências diretas:
+
+    1. **Ataque não autorizado a terceiros.** Cadastrar o site de outra
+       empresa transformaria o aperIA na origem de um ataque, com o IP da
+       nossa infraestrutura no log da vítima.
+    2. **SSRF privilegiado.** O worker de Tier 3 roda dentro da nossa rede e
+       alcança o que o usuário não alcança. `http://127.0.0.1:8090` é o
+       próprio ZAP; `http://10.0.0.5` é banco/Redis; e
+       `http://169.254.169.254` é o endpoint de metadata de AWS/GCP/Azure, que
+       devolve **credenciais IAM temporárias da instância** — que voltariam ao
+       usuário dentro dos findings do relatório.
+
+    Por isso só passa URL http/https absoluta, sem credenciais embutidas, com
+    host público: são recusados `localhost`, `127.0.0.0/8`, RFC1918
+    (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254.0.0/16` (o
+    metadata incluso), CGNAT `100.64.0.0/10`, ULA/loopback IPv6, IPv4 mapeado
+    em IPv6, as formas decimal/hexadecimal de IP (`http://2130706433`),
+    sufixos internos (`.local`, `.internal`, `.localhost`) e hosts de rótulo
+    único (`http://zap`), que só existem dentro da rede do worker.
+
+    O que a validação **não** cobre, deliberadamente: um domínio público cujo
+    DNS aponta para dentro (rebinding). Resolver DNS no cadastro seria TOCTOU
+    — o registro muda entre validar e escanear — então a defesa desse vetor é
+    de rede (egress policy no container do ZAP), não de schema.
+    """
     repo_store = SQLAlchemyRepositoryRepository(db)
     repo = repo_store.get_by_id(repository_id)
     if repo is None or repo.user_id != user_id:
         raise HTTPException(status_code=404, detail="Repositorio nao encontrado")
 
-    repo_store.set_active(repository_id, payload.active)
+    informados = payload.model_fields_set
+    if "active" in informados:
+        repo_store.set_active(repository_id, payload.active)
+    if "target_url" in informados:
+        # `None` aqui já é intenção explícita de limpar — o schema garantiu
+        # que a chave veio no JSON.
+        repo_store.set_target_url(repository_id, payload.target_url)
     db.commit()
 
     updated = repo_store.get_by_id(repository_id)
@@ -274,6 +379,7 @@ def trigger_repository_scan(
         github_app_configured=bool(
             settings.GITHUB_APP_ID and settings.GITHUB_PRIVATE_KEY_PATH
         ),
+        commit=db.commit,
     )
     try:
         dispatch = use_case.execute(repo)
@@ -285,6 +391,19 @@ def trigger_repository_scan(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except GithubResolutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ScanDispatchError as exc:
+        # Nada foi enfileirado e nenhum ScanJob ficou pendurado (o orquestrador
+        # encerra os tiers antes de propagar). Mensagem acionável em vez de um
+        # 500 anônimo: o problema é de infraestrutura, e repetir faz sentido.
+        logger.error("scan_manual_dispatch_falhou", repository_id=str(repository_id), error=str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Nao foi possivel enfileirar o scan: a fila de processamento nao "
+                "respondeu. Nenhum scan foi iniciado. Tente novamente em alguns "
+                "instantes; se persistir, verifique se o Redis e os workers estao no ar."
+            ),
+        ) from exc
     return ManualScanResponse(
         status=dispatch.status,
         commit_sha=dispatch.commit_sha,

@@ -93,11 +93,25 @@ resultado:
 - **Os relatórios continuam sendo gerados e persistidos**, disponíveis em
   `GET /scans/{commit_sha}/report` e `GET /repositories/{id}/reports`. A
   entrega muda de canal, não de conteúdo.
+- **O Semgrep do Tier 1 varre a árvore inteira**, não um diff. Sem PR não há
+  commit base contra o que comparar (`base_sha == commit_sha`), então o escopo
+  do scan é o repositório todo — mais lento que o scan de PR, e esperado. No
+  log: `tier1_semgrep_complete ... escopo=arvore_inteira`.
 
 ## Receita C — Simulação local via webhook assinado
 
 Use esta receita para disparar o pipeline sem um PR real, assinando o payload
 manualmente com HMAC.
+
+> **Use um repositório e um commit que existam de verdade.** Os workers de
+> Tier 1 e Tier 2 fazem checkout do commit antes de escanear (`git fetch
+> --depth 1` autenticado com o installation token do App). Com um
+> `repository.full_name` inventado, um SHA que não existe ou um
+> `installation.id` sem acesso ao repositório, o checkout falha e as tarefas
+> falham junto — de propósito: sem os arquivos não há o que escanear, e
+> concluir "0 findings" seria mentir. Você verá `scan_checkout_falhou` no log
+> do worker e o `GET /scans/{commit_sha}` mostrará os tiers pendentes como
+> `failed` (o commit não fica preso em `running`).
 
 ### 1. Conheça o contrato do webhook
 
@@ -158,6 +172,17 @@ dispara de forma assíncrona.
 docker compose -f docker-compose.base.yml logs -f \
   worker_tier1 worker_tier2 worker_analysis worker_reporting worker_tier3
 ```
+
+Eventos úteis para reconhecer o checkout no log:
+
+| Evento | Significa |
+|---|---|
+| `repo_checkout_pronto` | A árvore do commit foi materializada; o scanner vai rodar sobre ela. |
+| `repo_checkout_removido` | Diretório temporário apagado (sempre acontece, inclusive em falha). |
+| `repo_checkout_base_indisponivel` | O commit base sumiu (force-push). O scan continua; o Semgrep varre a árvore inteira em vez do diff. |
+| `scan_checkout_falhou` | Token, repositório ou commit inacessível — a tarefa falha e os tiers pendentes viram `failed`. |
+
+Nenhum desses logs contém o token: ele é redigido como `***` antes de sair.
 
 ## Próximos passos
 

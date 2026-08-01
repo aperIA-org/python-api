@@ -6,6 +6,7 @@ mockado no namespace do módulo de rotas).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -443,6 +444,38 @@ def test_manual_scan_409_when_scan_in_progress(
     pipeline_spy.assert_not_called()
 
 
+def test_manual_scan_libera_job_travado_e_dispara(
+    client, auth_headers, account, session_factory, user_id, github_app_configured,
+    pipeline_spy, monkeypatch,
+):
+    """Job "running" sem progresso além do limiar não pode prender o commit.
+
+    Cenário do incidente: a fila do broker se perdeu num restart da stack e a
+    linha ficou órfã. Sem a checagem preguiçosa, o 409 seria permanente — a
+    UNIQUE em commit_sha faz todo redisparo cair nessa mesma linha.
+    """
+    monkeypatch.setattr(settings, "SCAN_STALE_AFTER_MINUTES", 30)
+    rid = _repo_id(client, auth_headers, account)
+    with session_factory() as s:
+        SQLAlchemyScanJobRepository(s).save(
+            ScanJob(commit_sha="c" * 40, repo_url="https://github.com/acme/api",
+                    installation_id=42, user_id=user_id, repository_id=UUID(rid),
+                    tier1_status=TierStatus.RUNNING,
+                    created_at=datetime.utcnow() - timedelta(hours=22))
+        )
+        s.commit()
+
+    with patch("app.presentation.api.routes.repository_routes.GitHubClient") as MockClient:
+        MockClient.return_value.get_branch_head_sha.return_value = "c" * 40
+        resp = client.post(f"/repositories/{rid}/scan", headers=auth_headers)
+
+    assert resp.status_code == 202
+    pipeline_spy.assert_called_once()
+    with session_factory() as s:
+        job = SQLAlchemyScanJobRepository(s).get_by_commit("c" * 40)
+    assert job.tier1_status == TierStatus.FAILED
+
+
 def test_manual_scan_allows_new_scan_when_previous_finished(
     client, auth_headers, account, session_factory, user_id, github_app_configured, pipeline_spy
 ):
@@ -492,3 +525,252 @@ def test_manual_scan_502_when_github_fails(
 def test_manual_scan_requires_auth(client, auth_headers, account, github_app_configured):
     rid = _repo_id(client, auth_headers, account)
     assert client.post(f"/repositories/{rid}/scan").status_code == 401
+
+
+# ----------------------------------------------- target_url (alvo do DAST)
+
+
+def _tipos_de_erro(resp) -> list[str]:
+    """Códigos (`type`) dos erros de validação de um 422 do FastAPI."""
+    return [item["type"] for item in resp.json()["detail"]]
+
+
+def test_cria_sem_target_url_fica_nulo(client, auth_headers, account):
+    """O caso comum: repositório sem deploy conhecido → DAST segue pulado."""
+    resp = client.post("/repositories", headers=auth_headers, json=_create_payload(account))
+    assert resp.status_code == 201
+    assert resp.json()["target_url"] is None
+
+
+def test_cria_com_target_url(client, auth_headers, account):
+    resp = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    )
+    assert resp.status_code == 201
+    assert resp.json()["target_url"] == "https://staging.acme.com"
+
+    rid = resp.json()["id"]
+    assert client.get(f"/repositories/{rid}", headers=auth_headers).json()["target_url"] == (
+        "https://staging.acme.com"
+    )
+    assert client.get("/repositories", headers=auth_headers).json()[0]["target_url"] == (
+        "https://staging.acme.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "url,codigo",
+    [
+        ("staging.acme.com", "target_url_malformada"),
+        ("file:///etc/passwd", "target_url_esquema_invalido"),
+        ("ftp://acme.com", "target_url_esquema_invalido"),
+        ("https://admin:senha@acme.com", "target_url_com_credenciais"),
+        ("", "target_url_vazia"),
+    ],
+)
+def test_cria_recusa_url_invalida(client, auth_headers, account, url, codigo):
+    resp = client.post(
+        "/repositories", headers=auth_headers, json=_create_payload(account, target_url=url)
+    )
+    assert resp.status_code == 422
+    assert codigo in _tipos_de_erro(resp)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:8090",
+        "http://10.0.0.5/",
+        "http://172.16.0.1/",
+        "http://192.168.1.10/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://100.64.0.1/",
+        "http://2130706433/",
+        "http://api.local/",
+        "http://banco.internal/",
+    ],
+)
+def test_cria_recusa_alvo_interno(client, auth_headers, account, url):
+    """Cada alvo aqui seria um SSRF disparado pelo worker de Tier 3."""
+    resp = client.post(
+        "/repositories", headers=auth_headers, json=_create_payload(account, target_url=url)
+    )
+    assert resp.status_code == 422
+    assert "target_url_alvo_bloqueado" in _tipos_de_erro(resp)
+
+
+def test_patch_active_false_segue_igual(client, auth_headers, account):
+    """Contrato do cliente atual: `PATCH {"active": false}` não mudou."""
+    rid = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    ).json()["id"]
+
+    resp = client.patch(f"/repositories/{rid}", headers=auth_headers, json={"active": False})
+
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+    # e não encosta no target_url
+    assert resp.json()["target_url"] == "https://staging.acme.com"
+
+    reativa = client.patch(f"/repositories/{rid}", headers=auth_headers, json={"active": True})
+    assert reativa.json()["active"] is True
+    assert reativa.json()["target_url"] == "https://staging.acme.com"
+
+
+def test_patch_define_target_url_sem_mexer_no_active(client, auth_headers, account):
+    rid = client.post("/repositories", headers=auth_headers, json=_create_payload(account)).json()["id"]
+    client.patch(f"/repositories/{rid}", headers=auth_headers, json={"active": False})
+
+    resp = client.patch(
+        f"/repositories/{rid}",
+        headers=auth_headers,
+        json={"target_url": "https://staging.acme.com"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["target_url"] == "https://staging.acme.com"
+    assert resp.json()["active"] is False  # omitido = não tocado
+
+
+def test_patch_null_limpa_target_url(client, auth_headers, account):
+    """`null` explícito é a forma de remover o alvo — e só ela."""
+    rid = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    ).json()["id"]
+
+    resp = client.patch(f"/repositories/{rid}", headers=auth_headers, json={"target_url": None})
+
+    assert resp.status_code == 200
+    assert resp.json()["target_url"] is None
+    assert resp.json()["active"] is True
+
+
+def test_patch_dos_dois_campos_de_uma_vez(client, auth_headers, account):
+    rid = client.post("/repositories", headers=auth_headers, json=_create_payload(account)).json()["id"]
+
+    resp = client.patch(
+        f"/repositories/{rid}",
+        headers=auth_headers,
+        json={"active": False, "target_url": "https://staging.acme.com"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+    assert resp.json()["target_url"] == "https://staging.acme.com"
+
+
+def test_patch_recusa_alvo_interno(client, auth_headers, account):
+    rid = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    ).json()["id"]
+
+    resp = client.patch(
+        f"/repositories/{rid}",
+        headers=auth_headers,
+        json={"target_url": "http://169.254.169.254/latest/meta-data/"},
+    )
+
+    assert resp.status_code == 422
+    assert "target_url_alvo_bloqueado" in _tipos_de_erro(resp)
+    # a URL válida anterior continua intacta
+    assert client.get(f"/repositories/{rid}", headers=auth_headers).json()["target_url"] == (
+        "https://staging.acme.com"
+    )
+
+
+def test_patch_corpo_vazio_e_422(client, auth_headers, account):
+    rid = client.post("/repositories", headers=auth_headers, json=_create_payload(account)).json()["id"]
+    resp = client.patch(f"/repositories/{rid}", headers=auth_headers, json={})
+    assert resp.status_code == 422
+    assert "patch_sem_campos" in _tipos_de_erro(resp)
+
+
+def test_patch_active_null_e_422(client, auth_headers, account):
+    rid = client.post("/repositories", headers=auth_headers, json=_create_payload(account)).json()["id"]
+    resp = client.patch(f"/repositories/{rid}", headers=auth_headers, json={"active": None})
+    assert resp.status_code == 422
+    assert "active_nao_aceita_null" in _tipos_de_erro(resp)
+
+
+def test_patch_404_antes_de_gravar(client, auth_headers, account):
+    """Repositório de outro usuário: 404 e nada é escrito."""
+    rid = client.post("/repositories", headers=auth_headers, json=_create_payload(account)).json()["id"]
+    other = {"Authorization": f"Bearer {create_access_token(uuid4(), settings.SECRET_KEY, 15)}"}
+
+    resp = client.patch(
+        f"/repositories/{rid}", headers=other, json={"target_url": "https://x.acme.com"}
+    )
+
+    assert resp.status_code == 404
+    assert client.get(f"/repositories/{rid}", headers=auth_headers).json()["target_url"] is None
+
+
+def test_post_upsert_preserva_target_url_ja_gravada(client, auth_headers, account):
+    """Reativar por POST não pode apagar o alvo configurado antes."""
+    rid = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    ).json()["id"]
+    client.patch(f"/repositories/{rid}", headers=auth_headers, json={"active": False})
+
+    # POST de reativação, sem repetir a URL no payload
+    again = client.post("/repositories", headers=auth_headers, json=_create_payload(account))
+
+    assert again.json()["id"] == rid
+    assert again.json()["active"] is True
+    assert again.json()["target_url"] == "https://staging.acme.com"
+
+
+def test_post_upsert_atualiza_target_url_quando_informada(client, auth_headers, account):
+    rid = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://staging.acme.com"),
+    ).json()["id"]
+
+    again = client.post(
+        "/repositories",
+        headers=auth_headers,
+        json=_create_payload(account, target_url="https://preview.acme.com"),
+    )
+
+    assert again.json()["id"] == rid
+    assert again.json()["target_url"] == "https://preview.acme.com"
+
+
+def test_manual_scan_repassa_target_url_ao_pipeline(
+    client, auth_headers, account, github_app_configured, pipeline_spy
+):
+    """Gatilho manual: a URL cadastrada chega ao canvas como alvo do ZAP."""
+    rid = _repo_id(client, auth_headers, account, target_url="https://staging.acme.com")
+
+    with patch("app.presentation.api.routes.repository_routes.GitHubClient") as MockClient:
+        MockClient.return_value.get_branch_head_sha.return_value = "c" * 40
+        assert client.post(f"/repositories/{rid}/scan", headers=auth_headers).status_code == 202
+
+    assert pipeline_spy.call_args.kwargs["target_url"] == "https://staging.acme.com"
+
+
+def test_manual_scan_sem_target_url_mantem_none(
+    client, auth_headers, account, github_app_configured, pipeline_spy
+):
+    """Sem alvo cadastrado o canvas continua recebendo `None` (ZAP pulado)."""
+    rid = _repo_id(client, auth_headers, account)
+
+    with patch("app.presentation.api.routes.repository_routes.GitHubClient") as MockClient:
+        MockClient.return_value.get_branch_head_sha.return_value = "c" * 40
+        assert client.post(f"/repositories/{rid}/scan", headers=auth_headers).status_code == 202
+
+    assert pipeline_spy.call_args.kwargs["target_url"] is None

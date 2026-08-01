@@ -71,6 +71,39 @@ def test_create_scan_job(persistence_on):
     assert job.tier1_started_at is not None
 
 
+def test_redisparo_reinicia_a_execucao_anterior(persistence_on):
+    """A UNIQUE em commit_sha faz o redisparo cair na MESMA linha — ela não pode
+    manter os timestamps da execução anterior (a duração exibida viraria ficção).
+    """
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+    scan_job_writer.mark_tier("a" * 40, 1, "done")
+    scan_job_writer.mark_tier("a" * 40, 2, "done")
+    scan_job_writer.mark_blocked("a" * 40, 2)
+    scan_job_writer.set_final_risk_from_analysis(
+        "a" * 40, {"risk_score": {"score": 70, "level": "high"}}
+    )
+    primeira = _read(persistence_on)
+
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+
+    segunda = _read(persistence_on)
+    assert segunda.tier1_status == TierStatus.RUNNING
+    assert segunda.tier1_started_at >= primeira.tier1_started_at
+    assert segunda.tier1_completed_at is None
+    assert segunda.tier2_status is None
+    assert segunda.blocked_at_tier is None
+    assert segunda.final_risk_score is None and segunda.final_risk_level is None
+    # created_at preservado: é quando o commit entrou no sistema.
+    assert segunda.created_at == primeira.created_at
+    # E continua sendo uma única linha (nada de duplicar por commit).
+    with persistence_on() as s:
+        assert SQLAlchemyScanJobRepository(s).count() == 1
+
+
 def test_mark_tier(persistence_on):
     scan_job_writer.create_scan_job(
         commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
@@ -79,6 +112,34 @@ def test_mark_tier(persistence_on):
     job = _read(persistence_on)
     assert job.tier2_status == TierStatus.DONE
     assert job.tier2_completed_at is not None
+
+
+def test_mark_tier_skipped(persistence_on):
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+    scan_job_writer.mark_tier_skipped("a" * 40, 3)
+    job = _read(persistence_on)
+    assert job.tier3_status == TierStatus.SKIPPED
+    assert job.tier3_completed_at is not None
+
+
+@pytest.mark.parametrize("status_final", ["done", "failed"])
+def test_mark_tier_skipped_nao_sobrescreve_desfecho_real(persistence_on, status_final):
+    """Pular é decisão sobre um tier que não rodou — se ele rodou, não mexe."""
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+    scan_job_writer.mark_tier("a" * 40, 3, status_final)
+    scan_job_writer.mark_tier_skipped("a" * 40, 3)
+    assert _read(persistence_on).tier3_status == TierStatus(status_final)
+
+
+def test_mark_tier_skipped_sem_commit_sha_e_noop(persistence_on):
+    # Guarda contra o bug original: commit_sha vazio não pode virar UPDATE
+    # sem WHERE útil nem log de erro.
+    scan_job_writer.mark_tier_skipped("", 3)
+    assert _read(persistence_on) is None
 
 
 def test_mark_blocked(persistence_on):
@@ -117,4 +178,40 @@ def test_disabled_is_noop(sqlite_factory):
         scan_job_writer.create_scan_job(
             commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
         )
+    assert _read(sqlite_factory) is None
+
+
+def test_fail_pending_tiers_libera_o_commit(persistence_on):
+    """Falha de checkout encerra os tiers pendentes na hora.
+
+    Mesmo efeito da varredura de jobs travados, sem esperar o limiar de
+    ``SCAN_STALE_AFTER_MINUTES``: o job deixa de estar ``em_andamento`` e o
+    disparo manual daquele commit para de responder 409.
+    """
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+    scan_job_writer.fail_pending_tiers("a" * 40, motivo="checkout_tier1: fetch falhou")
+
+    job = _read(persistence_on)
+    assert job.tier1_status == TierStatus.FAILED
+    assert job.em_andamento() is False
+
+
+def test_fail_pending_tiers_preserva_tier_concluido(persistence_on):
+    scan_job_writer.create_scan_job(
+        commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+    )
+    scan_job_writer.mark_tier("a" * 40, 1, "done")
+    scan_job_writer.mark_tier("a" * 40, 2, "running")
+    scan_job_writer.fail_pending_tiers("a" * 40)
+
+    job = _read(persistence_on)
+    assert job.tier1_status == TierStatus.DONE
+    assert job.tier2_status == TierStatus.FAILED
+
+
+def test_fail_pending_tiers_desligado_e_noop(sqlite_factory):
+    with patch.object(scan_job_writer, "SessionLocal", sqlite_factory):
+        scan_job_writer.fail_pending_tiers("a" * 40)
     assert _read(sqlite_factory) is None

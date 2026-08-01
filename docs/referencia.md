@@ -28,9 +28,9 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 | `GET` | `/github/accounts` | Lista as contas GitHub (instalações) conectadas pelo usuário. | JWT |
 | `DELETE` | `/github/accounts/{account_id}` | Desconecta uma conta GitHub **e remove, na mesma transação, os `repositories` vinculados a ela**. Findings, scans e relatórios são preservados. 404 se não pertencer ao usuário. | JWT |
 | `GET` | `/repositories` | Lista repositórios ativados para análise pelo usuário. | JWT |
-| `POST` | `/repositories` | Ativa um repositório, vinculado a uma `github_account_id` do usuário. **Upsert** por `(user_id, github_repo_id)`: reativar devolve o `id` da linha já existente, não um novo. 404 se a conta não pertencer ao usuário. | JWT |
+| `POST` | `/repositories` | Ativa um repositório, vinculado a uma `github_account_id` do usuário. **Upsert** por `(user_id, github_repo_id)`: reativar devolve o `id` da linha já existente, não um novo. Aceita `target_url` (opcional) — omitir **preserva** a URL já gravada. 404 se a conta não pertencer ao usuário; `422` se a `target_url` for recusada. | JWT |
 | `GET` | `/repositories/{repository_id}` | Detalhe de um repositório. 404 se não pertencer ao usuário. | JWT |
-| `PATCH` | `/repositories/{repository_id}` | Ativa/desativa um repositório (`active`). 404 se não pertencer ao usuário. | JWT |
+| `PATCH` | `/repositories/{repository_id}` | Atualização **parcial**: aplica só as chaves presentes no corpo (`active` e/ou `target_url`). `{"active": false}` segue idêntico; `{"target_url": null}` limpa o alvo de DAST. 404 se não pertencer ao usuário; `422` para corpo vazio, `active: null` ou `target_url` recusada. Ver "Alvo de DAST" abaixo. | JWT |
 | `DELETE` | `/repositories/{repository_id}` | Remove o vínculo do repositório. 404 se não pertencer ao usuário. | JWT |
 | `POST` | `/repositories/{repository_id}/scan` | Dispara um scan manual no HEAD do `default_branch` — mesmo pipeline do webhook, com `pr_number=None`. `202` com `{"status","commit_sha","branch"}`; `409` se desativado ou se já há scan em andamento no commit; `502` se o GitHub não resolver o HEAD; `503` sem credenciais do App. | JWT |
 | `GET` | `/repositories/{repository_id}/scans` | Lista scans (`ScanJob`) do repositório, paginados. | JWT |
@@ -69,7 +69,8 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `CALDERA_AGENT_GROUP` | `"red"` | Grupo de agentes usado na emulação Caldera. |
 | `LLM_GUARD_ENABLED` | `True` | Bloqueio de padrões de prompt injection antes de chamar a API do Claude. |
 | `FINDINGS_PERSISTENCE_ENABLED` | `True` | Escrita best-effort de `Finding` na tabela `findings` pelos scan workers; testes desligam. |
-| `SCAN_PERSISTENCE_ENABLED` | `True` | Escrita best-effort do ciclo de vida do `ScanJob` (criação + updates de status por tier); testes desligam. |
+| `SCAN_PERSISTENCE_ENABLED` | `True` | Escrita best-effort do ciclo de vida do `ScanJob` (criação + updates de status por tier); testes desligam. Também controla a varredura de jobs travados no boot da API. |
+| `SCAN_STALE_AFTER_MINUTES` | `30` | Minutos sem progresso a partir dos quais um `ScanJob` ainda `queued`/`running` é considerado **travado** e marcado como `failed`. Ver "Recuperação de scans travados" abaixo. Suba o valor se o Tier 3 (ZAP/Caldera) passa rotineiramente de 30 min. |
 | `REDIS_URL` | `redis://redis:6379/0` | Broker e result backend do Celery (hostname do container, não `localhost`). |
 | `CELERY_BROKER_URL` | `""` | Override do broker; vazio deriva de `REDIS_URL`. |
 | `CELERY_RESULT_BACKEND` | `""` | Override do result backend; vazio deriva de `REDIS_URL`. |
@@ -117,7 +118,7 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `installation_id` | `int` | Instalação do GitHub App que originou o evento. |
 | `pr_number` | `int \| None` | Número do PR. `None` em scan manual (`POST /repositories/{id}/scan`) — o pipeline é o mesmo, mas os workers de reporting não comentam em PR nenhum (o status check no commit continua sendo criado). |
 | `repo_full_name` | `str \| None` | `org/repo`. |
-| `tier1_status` / `tier2_status` / `tier3_status` | `TierStatus \| None` | Status por tier. |
+| `tier1_status` / `tier2_status` / `tier3_status` | `TierStatus \| None` | Status por tier: `queued`, `running`, `done`, `failed`, `skipped` — ou `None` (o tier ainda não foi alcançado). `skipped` é **decisão de gate**, não ausência de dado: ver "Gates" abaixo. |
 | `tier1_started_at` / `tier1_completed_at` (idem tier2/tier3) | `datetime \| None` | Timestamps de início/fim por tier. |
 | `blocked_at_tier` | `ScanTier \| None` | Tier em que um gate interrompeu o pipeline. |
 | `final_risk_score` | `int \| None` | Score final (produzido pelo Claude). |
@@ -126,7 +127,75 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `repository_id` | `UUID \| None` | `Repository` que originou o scan; nullable p/ scans legados. |
 | `created_at` | `datetime` | `default_factory=datetime.utcnow`. |
 
-**UNIQUE:** `scan_jobs_commit_sha_key` em `commit_sha`.
+**UNIQUE:** `scan_jobs_commit_sha_key` em `commit_sha`. Como a chave é o commit,
+um **redisparo do mesmo commit reaproveita a linha**: `create_scan_job` detecta
+que ela já existe e chama `restart_execution`, zerando `tier*_status`,
+`tier*_started_at`, `tier*_completed_at`, `blocked_at_tier`, `final_risk_score` e
+`final_risk_level`. `created_at` é preservado — ele marca quando o commit entrou
+no sistema pela primeira vez, e a duração de uma execução deve ser lida a partir
+dos `tier*_started_at`, que são sempre da execução corrente.
+
+Métodos do domínio (`ScanJob`):
+
+| Método | O que é |
+|---|---|
+| `em_andamento()` | Algum tier em `queued`/`running`. É o que produz o `409` do disparo manual. |
+| `ultimo_progresso_em` | O **mais recente** entre todos os `tier*_started_at`/`tier*_completed_at` e o `created_at`. O `created_at` entra porque pode ser o único timestamp existente: a linha nasce com o Tier 1 em `running` e, se ninguém consumir a fila, nenhum outro é escrito. |
+| `esta_travado(agora, limiar_minutos)` | `em_andamento()` **e** `ultimo_progresso_em` mais velho que o limiar (`SCAN_STALE_AFTER_MINUTES`). |
+| `status_do_tier(tier)` | `TierStatus \| None` do tier pedido (`ScanTier.ONE/TWO/THREE`). |
+| `tier_concluido(tier)` | Tier já tem desfecho real (`done`/`failed`). É o que impede um gate de sobrescrever com `skipped` o resultado de um tier que de fato rodou. |
+
+#### Gates — o que cada decisão grava
+
+Os dois gates do pipeline interrompem o chain com `Ignore()`, e **a interrupção
+em si é o dado mais importante do scan**. Por isso ambos persistem a decisão
+antes do `raise` (best-effort, via `scan_job_writer`):
+
+| Gate | Condição | O que grava |
+|---|---|---|
+| **Gate 1** (`gate1_check`) | Passa | `tier1_status = done` |
+| | Bloqueia (`secret_verified`) | `tier1_status = done`, `blocked_at_tier = 1` e `tier2_status = tier3_status = skipped` — T2 e T3 nunca vão rodar neste commit |
+| **Gate 2** (`tier3_gate`) | Escala (`high`/`critical`) | `tier3_status = running` |
+| | Pula (severidade abaixo do limiar) | `tier3_status = skipped` |
+
+`skipped` e `NULL` significam coisas diferentes e a UI deve distingui-las:
+`skipped` é "um gate decidiu que este tier não roda"; `NULL` é "o pipeline ainda
+não chegou aqui". A gravação usa `scan_job_writer.mark_tier_skipped`, que checa
+`tier_concluido()` antes de escrever — um gate rodando fora de ordem (retry do
+canvas, redisparo) não apaga um tier `done`/`failed`.
+
+A identidade do scan usada pelo Gate 2 vem **do payload**: `tier2_analyze`
+injeta `commit_sha` no dict de análise, que trafega pelo canvas até o gate (o
+`tier3_gate` recebe só o resultado da task anterior como argumento posicional).
+Ler o commit de dentro dos `findings` não funciona — o caso mais comum hoje é
+justamente o de zero findings, e a decisão sairia sem identificação no log
+(`tier3_skipped commit_sha=`) e sem persistência.
+
+#### Recuperação de scans travados
+
+Um `ScanJob` fica **travado** quando a tarefa Celery correspondente deixa de
+existir (fila perdida num restart da stack, worker morto) mas a linha no
+Postgres sobrevive dizendo `running`. Além de mentir em `GET /scans`, ela
+bloqueia o commit: `POST /repositories/{id}/scan` responde `409` enquanto algum
+tier estiver `queued`/`running`, e a UNIQUE em `commit_sha` faz todo redisparo
+cair na mesma linha — o commit vira permanentemente não-escaneável.
+
+Não há celery beat na stack; a recuperação acontece em dois pontos
+complementares, ambos usando `SCAN_STALE_AFTER_MINUTES`:
+
+1. **Varredura no boot da API** (`recover_stale_scan_jobs`, `app/main.py` →
+   `RecoverStaleScanJobsUseCase`): lista os jobs em andamento, marca como
+   `failed` os tiers pendentes dos que estão travados e loga
+   `scan_job_stale_liberado` / `scan_jobs_stale_recovery_done`. Best-effort: uma
+   falha de banco é logada (`scan_jobs_stale_recovery_failed`) e a API sobe
+   assim mesmo. Não roda com `SCAN_PERSISTENCE_ENABLED=false`.
+2. **Checagem preguiçosa no disparo** (`TriggerRepositoryScanUseCase`): um job
+   travado não bloqueia — ele é marcado como `failed`
+   (`scan_job_stale_liberado_no_disparo`) e o novo scan segue. Um job realmente
+   em andamento continua respondendo `409`.
+
+Em ambos os casos só os tiers pendentes viram `failed`; tiers já `done`/`skipped`
+ficam intactos.
 
 > Tabela relacionada `scan_reports` (não é entidade de domínio própria, é o relatório markdown por tier/commit): **UNIQUE** `scan_reports_commit_tier_key` em `(commit_sha, tier)`.
 
@@ -143,9 +212,67 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `url` | `str` | URL do repositório. |
 | `default_branch` | `str` | Default `"main"`. |
 | `active` | `bool` | Default `True`; controla se o repo está sob análise. |
+| `target_url` | `str \| None` | URL onde a **aplicação** está publicada (staging/preview) — alvo do DAST no Tier 3. Não confundir com `url`, que é o endereço do repositório no GitHub. Default `None` (sem deploy conhecido). Ver "Alvo de DAST" abaixo. |
 | `created_at` | `datetime` | `default_factory=datetime.utcnow`. |
 
 **UNIQUE:** `repositories_user_repo_key` em `(user_id, github_repo_id)` — é a chave do upsert de `POST /repositories`. O `save()` usa `RETURNING`, então a rota devolve a linha realmente persistida (com o `id` original em caso de conflito), e não o `uuid4()` gerado em memória.
+
+#### Alvo de DAST (`target_url`)
+
+É a origem que faltava para o ZAP: `dispatch_pipeline` passava `target_url=None`
+fixo, então o Tier 3 sempre pulava o DAST (`reason="no_target_url"`). Agora o
+valor vem do repositório cadastrado, nos **dois** gatilhos — o manual lê
+`Repository.target_url` direto; o webhook resolve o repositório pela instalação
+(`_resolve_owner`, que devolve `(user_id, repository_id, target_url)`), porque o
+payload do GitHub não sabe onde a aplicação está publicada. Daí em diante o valor
+já corria: `dispatch_pipeline` → `build_pipeline_canvas` →
+`_prepare_tier3_payload` → `run_tier3_scan` → `ZAPScanner.scan`. `None` continua
+significando "sem deploy conhecido", e o ZAP segue pulado — comportamento
+idêntico ao de antes para quem não preencher.
+
+**Semântica no `PATCH`** (o schema era `active` obrigatório; virou parcial, sem
+quebrar o cliente que envia `{"active": false}`): a rota decide por **presença da
+chave** no JSON (`model_fields_set`), não por "veio `None`" — porque em
+`target_url` o `null` é valor legítimo, não omissão.
+
+| Corpo | Efeito |
+|---|---|
+| `{"active": false}` | Desativa. `target_url` intacta. |
+| `{"target_url": "https://staging.acme.com"}` | Define o alvo. `active` intacto. |
+| `{"target_url": null}` | **Limpa** o alvo (volta a pular o DAST). |
+| `{}` | `422` `patch_sem_campos` — erro de cliente não vira no-op silencioso. |
+| `{"active": null}` | `422` `active_nao_aceita_null`. |
+
+No `POST` (upsert) a coluna usa `COALESCE`: omitir o campo **preserva** a URL já
+gravada — senão um POST de reativação apagaria o alvo sem ninguém pedir. Limpar é
+sempre operação explícita do `PATCH`.
+
+**Validação anti-SSRF** (`app/domain/github/target_url.py`). O `target_url` não é
+um link exibido: ele é entregue ao ZAP, que faz spider e **active scan** —
+dispara payloads reais de SQLi/XSS/path traversal. Aceitar URL arbitrária
+significaria (a) atacar terceiros com o IP da nossa infraestrutura no log da
+vítima e (b) SSRF privilegiado, já que o worker de Tier 3 alcança a rede interna
+que o usuário não alcança — inclusive `169.254.169.254`, o metadata de
+AWS/GCP/Azure, que devolve credenciais IAM da instância e cujo conteúdo voltaria
+ao usuário dentro dos findings.
+
+Só passa http/https absoluta, sem credenciais embutidas, com host público. São
+recusados: `localhost` e `127.0.0.0/8`, RFC1918 (`10/8`, `172.16/12`,
+`192.168/16`), link-local `169.254.0.0/16` (metadata incluso), CGNAT
+`100.64.0.0/10`, `0.0.0.0`, loopback/ULA IPv6 (`::1`, `fe80::/10`, `fc00::/7`),
+IPv4 mapeado em IPv6, as formas decimal/hexadecimal do mesmo IP
+(`http://2130706433`), os sufixos `.local`/`.internal`/`.localhost`/`.home.arpa`/`.lan`
+e hosts de rótulo único (`http://zap`), que só existem dentro da rede do worker.
+
+Erros saem como `422` com `type` estável por motivo — `target_url_malformada`,
+`target_url_vazia`, `target_url_muito_longa`, `target_url_esquema_invalido`,
+`target_url_com_credenciais`, `target_url_alvo_bloqueado`,
+`target_url_host_sem_dominio` — e `msg` em português exibível ao usuário.
+
+**Limite deliberado:** um domínio público cujo DNS aponta para dentro (rebinding)
+passa. Resolver DNS no cadastro seria TOCTOU — o registro muda entre validar e
+escanear — então a defesa desse vetor é de rede (egress policy no container do
+ZAP), não de schema.
 
 Não há `ForeignKey` para `github_accounts`: quando uma conta é desconectada (`DELETE /github/accounts/{id}`), a limpeza dos repositórios dela é explícita, feita na mesma transação.
 
@@ -174,8 +301,13 @@ Não há `ForeignKey` para `github_accounts`: quando uma conta é desconectada (
 | `worker_tier3` | `python-api-worker_tier3-1` | — | Celery fila `tier3`, concurrency 1. |
 | `worker_analysis` | `python-api-worker_analysis-1` | — | Celery fila `analysis`, concurrency 2. |
 | `worker_reporting` | `python-api-worker_reporting-1` | — | Celery fila `reporting`, concurrency 2. |
-| `redis` | `aperia-redis` | — | Broker + result backend do Celery. |
-| `db` | `aperia-db` | — | PostgreSQL 15 (`postgres`/`postgres`, banco `aperia`). |
+| `redis` | `aperia-redis` | — | Broker + result backend do Celery. Roda com `--appendonly yes` e volume `aperia_redis_data:/data` — a fila sobrevive a um `docker compose down`. |
+| `db` | `aperia-db` | — | PostgreSQL 15 (`postgres`/`postgres`, banco `aperia`), volume `aperia_db_data`. |
+
+Volumes nomeados: `aperia_db_data` (dados do Postgres) e `aperia_redis_data`
+(AOF do Redis). Os dois existem pelo mesmo motivo: banco e broker precisam ter
+durabilidade equivalente — ver
+[explicacao-pipeline.md](explicacao-pipeline.md#7-jobs-travados-e-a-assimetria-de-durabilidade-entre-postgres-e-redis).
 
 Camadas opcionais (compose files adicionais): `docker-compose.scanners.yml` (ZAP `:8090`, OpenCTI `:8081`, Caldera `:8888` — necessários para o Tier 3 produzir dados reais) e `docker-compose.observability.yml` (Prometheus `:9090`, Grafana `:3000`).
 

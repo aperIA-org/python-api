@@ -37,7 +37,13 @@ class Settings(BaseSettings):
 
     # ---- DAST (ZAP) ----
     ZAP_BASE_URL: str = "http://zap:8090"
-    ZAP_API_KEY: str = ""
+    # Default IGUAL ao do docker-compose.scanners.yml (`${ZAP_API_KEY:-changeme}`).
+    # Divergir é o bug: com a variável ausente o container subia com "changeme"
+    # e o scanner mandava "", então o ZAP recusava toda chamada com
+    # "API key incorrect or not supplied" — e o erro chegava ao worker como
+    # "Server disconnected", que parece servidor fora do ar, não credencial
+    # errada. Uma variável faltando, dois fallbacks discordantes.
+    ZAP_API_KEY: str = "changeme"
 
     # ---- Threat Intel (OpenCTI) ----
     OPENCTI_URL: str = "http://opencti:8081"
@@ -64,6 +70,21 @@ class Settings(BaseSettings):
     # start_pipeline + updates de status por tier nos workers). Mesmo
     # racional do flag de findings: default True; testes desligam por padrão.
     SCAN_PERSISTENCE_ENABLED: bool = True
+
+    # Minutos sem progresso a partir dos quais um ScanJob ainda "queued"/
+    # "running" é considerado travado (stale) e pode ser marcado como failed.
+    # Existe porque o Redis é o broker: se a fila se perde (restart da stack,
+    # worker morto), a linha no Postgres sobrevive sem ninguém para concluí-la
+    # e o commit fica permanentemente barrado pelo 409 do disparo manual.
+    # Usado na varredura de boot da API e na checagem preguiçosa do disparo.
+    SCAN_STALE_AFTER_MINUTES: int = 30
+
+    # ---- Checkout do repositório ----
+    # Teto para cada operação de rede do checkout efêmero (fetch raso do
+    # commit). Existe porque um repositório enorme ou uma conexão pendurada
+    # não pode prender o worker para sempre — sem timeout a task ficaria viva
+    # e o ScanJob preso em "running" até a varredura de jobs travados.
+    REPO_CHECKOUT_TIMEOUT: int = 300
 
     # ---- Celery / Redis ----
     # Default aponta para o hostname do container (docker-compose service "redis"),

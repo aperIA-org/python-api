@@ -50,6 +50,47 @@ _INJECTION_PATTERNS = [
 ]
 
 
+
+# Material sensível que um scanner de secrets legitimamente encontra e reporta.
+# Redigido ANTES de compor o prompt: o modelo não precisa do segredo em si para
+# raciocinar sobre ele — precisa saber que existe, de que tipo e onde.
+_SEGREDOS_A_REDIGIR = [
+    # Bloco PEM completo (com END) ou truncado (só o header + corpo base64).
+    (
+        re.compile(
+            r"-{2,}\s*BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY"
+            r"[\s\S]*?(?:-{2,}\s*END\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?"
+            r"PRIVATE\s+KEY\s*-{2,}|$)",
+            re.I,
+        ),
+        "[chave privada redigida pelo aperIA]",
+    ),
+]
+
+
+def redigir_segredos(texto: str) -> tuple[str, int]:
+    """Substitui material de segredo por marcador. Devolve (texto, nº de trocas).
+
+    Existe porque a guarda anti-prompt-injection e o produto se atropelavam: o
+    padrão ``BEGIN ... PRIVATE KEY`` é, ao mesmo tempo, um vetor conhecido de
+    injection **e** exatamente aquilo que um scanner de secrets deve achar. Com
+    o Juice Shop — que tem uma chave privada real no repositório — a guarda
+    bloqueava a chamada e o Tier 2 caía em modo degradado. Ou seja: quanto
+    melhor o scanner trabalhava, menos análise por IA o usuário recebia.
+
+    Redigir resolve os dois lados de uma vez. O segredo **não sai** da
+    infraestrutura (mandar uma chave privada real para um LLM de terceiros é
+    indesejável por si só), e o texto que sobra não dispara a guarda. O valor
+    original continua no banco e em ``raw_output`` — quem precisa dele é o
+    usuário, não o modelo.
+    """
+    trocas = 0
+    for padrao, marcador in _SEGREDOS_A_REDIGIR:
+        texto, n = padrao.subn(marcador, texto)
+        trocas += n
+    return texto, trocas
+
+
 @dataclass(frozen=True)
 class GuardResult:
     safe: bool

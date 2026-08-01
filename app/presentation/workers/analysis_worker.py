@@ -95,9 +95,14 @@ def gate1_check(
                 commit_sha=commit_sha,
                 error=str(exc),
             )
-        # Registra o bloqueio na projeção do scan (best-effort).
+        # Registra o bloqueio na projeção do scan (best-effort). Tier 2 e
+        # Tier 3 nunca vão rodar para este commit — gravamos "skipped" em vez
+        # de deixar NULL, que na API/dashboard é indistinguível de "ainda não
+        # chegou nesse tier".
         scan_job_writer.mark_tier(commit_sha, 1, "done")
         scan_job_writer.mark_blocked(commit_sha, 1)
+        scan_job_writer.mark_tier_skipped(commit_sha, 2)
+        scan_job_writer.mark_tier_skipped(commit_sha, 3)
         # Interrompe o chain Celery — Tier 2 e Tier 3 não rodam.
         raise Ignore()
 
@@ -155,6 +160,9 @@ def tier2_analyze(
         return {
             "degraded": True,
             "reason": type(exc).__name__,
+            # Identidade do scan viaja no payload — ver comentário no
+            # caminho normal, logo abaixo.
+            "commit_sha": commit_sha,
             "findings": findings,
             "cti_status": "available" if cti_data else "unavailable",
             "caldera_status": "available" if caldera_results else "unavailable",
@@ -166,6 +174,12 @@ def tier2_analyze(
     )
     analysis["degraded"] = False
     analysis["findings"] = findings
+    # A identidade do scan viaja NO PAYLOAD, não só nos kwargs do canvas: o
+    # ``tier3_gate`` recebe apenas o resultado da task anterior (primeiro arg
+    # posicional) e precisa do commit para logar e persistir a decisão. Ler o
+    # commit de dentro dos findings não serve — com 0 findings (caso mais
+    # comum hoje) não há de onde ler.
+    analysis["commit_sha"] = commit_sha
     scan_job_writer.mark_tier(commit_sha, 2, "done")
     scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
     return analysis
@@ -176,6 +190,21 @@ def tier2_analyze(
 # Embora MEDIUM seja um "meio termo", o guia explicitamente diz
 # "high ou critical" — manter o threshold conservador para custo.
 _TIER3_ESCALATION_SEVERITIES = {"high", "critical"}
+
+
+def _nivel_de_risco(analysis: dict[str, Any]) -> str:
+    """Nível agregado calculado pelo Tier 2 (``"info"`` se ausente).
+
+    Aceita os dois shapes usados no pipeline: ``risk_score_adjusted`` (Tier 3)
+    tem precedência sobre ``risk_score`` (Tier 2), mesma ordem que
+    ``scan_job_writer`` usa para gravar ``final_risk_level`` — as duas leituras
+    precisam concordar, senão o dashboard mostraria um nível e o gate teria
+    decidido por outro.
+    """
+    risco = analysis.get("risk_score_adjusted") or analysis.get("risk_score") or {}
+    if not isinstance(risco, dict):
+        return "info"
+    return str(risco.get("level") or "info").lower()
 
 
 def _max_severity(findings: list[dict[str, Any]]) -> str:
@@ -204,21 +233,44 @@ def _max_severity(findings: list[dict[str, Any]]) -> str:
     bind=True,
     queue="analysis",
 )
-def tier3_gate(self, analysis: dict[str, Any]) -> dict[str, Any]:
+def tier3_gate(
+    self,
+    analysis: dict[str, Any],
+    *,
+    commit_sha: str | None = None,
+) -> dict[str, Any]:
     """Gate 2 — decide se o pipeline escala para Tier 3.
 
-    Regras (decisões da Semana 9):
+    Escala se **qualquer** um dos dois critérios valer:
 
-    - ``high`` ou ``critical`` em qualquer finding → escala. Retorna
-      o ``analysis`` inalterado para a próxima task no chain Celery.
-    - Caso contrário → ``raise Ignore()`` para interromper o chain
+    1. ``high``/``critical`` em algum finding — um problema grave isolado;
+    2. ``high``/``critical`` no **risco agregado** do Tier 2
+       (``risk_score.level``) — o conjunto é grave mesmo sem nenhum item
+       individualmente grave.
+
+    O critério 2 foi acrescentado depois: sozinho, o 1 ignora volume e
+    correlação, que é exatamente o que o Tier 2 calcula. O caso que expôs a
+    lacuna foram 57 possíveis secrets num repositório, todos ``medium``
+    individualmente, somando risco ``high`` (74/100) — o pipeline descartava a
+    análise profunda justamente onde ela seria mais útil.
+
+    Escalando, retorna o ``analysis`` inalterado para a próxima task no chain.
+    O log registra qual critério disparou: severidade aponta para UM finding,
+    risco agregado aponta para o conjunto — investigações diferentes.
+
+    - Nenhum dos dois → ``raise Ignore()`` para interromper o chain
       sem executar Tier 3. Decisão explícita: **não retornar dict
       de skip** — o Celery não deve passar adiante quando o Gate
-      decide encerrar.
+      decide encerrar. Antes do ``Ignore``, a decisão é gravada na
+      projeção (``tier3_status = 'skipped'``).
 
     Quando ``analysis`` é ``None`` (Gate 1 raised Ignore antes), o
     Gate 2 propaga a interrupção também com ``raise Ignore()`` —
     nada downstream deve rodar.
+
+    ``commit_sha`` é opcional porque o canvas passa o ``analysis`` como
+    primeiro arg posicional e não injeta kwargs neste ponto; quando vier
+    explícito, ele ganha de qualquer coisa lida do payload.
     """
     from celery.exceptions import Ignore as _Ignore
 
@@ -227,13 +279,39 @@ def tier3_gate(self, analysis: dict[str, Any]) -> dict[str, Any]:
     findings = analysis.get("findings", []) or []
     max_severity = _max_severity(findings)
 
-    commit_sha = _extract_commit(analysis)
+    commit_sha = commit_sha or _extract_commit(analysis)
+    if not commit_sha:
+        # A decisão mais cara do pipeline não pode ficar anônima no log.
+        logger.warning("tier3_gate_sem_commit", findings_count=len(findings))
 
-    if max_severity in _TIER3_ESCALATION_SEVERITIES:
+    nivel_risco = _nivel_de_risco(analysis)
+
+    # Dois critérios, em OR. Antes só existia o primeiro, e ele ignora volume e
+    # correlação — justamente o que o Tier 2 acabou de calcular.
+    #
+    # O caso real que motivou: 57 possíveis secrets num repositório, todos
+    # `medium` individualmente (não verificados não travam merge por suspeita),
+    # somando risco agregado `high` 74/100. Nenhum finding sozinho cruzava a
+    # barra, então o Tier 3 era pulado — descartando a análise profunda no
+    # cenário em que ela é mais útil.
+    por_severidade = max_severity in _TIER3_ESCALATION_SEVERITIES
+    por_risco_agregado = nivel_risco in _TIER3_ESCALATION_SEVERITIES
+
+    if por_severidade or por_risco_agregado:
         logger.info(
             "tier3_escalated",
             commit_sha=commit_sha,
             max_severity=max_severity,
+            nivel_risco=nivel_risco,
+            # Qual critério disparou muda o que investigar: severidade aponta
+            # para UM finding grave, risco agregado aponta para o conjunto.
+            criterio=(
+                "severidade_e_risco"
+                if por_severidade and por_risco_agregado
+                else "severidade_individual"
+                if por_severidade
+                else "risco_agregado"
+            ),
             findings_count=len(findings),
             degraded=bool(analysis.get("degraded")),
         )
@@ -244,15 +322,28 @@ def tier3_gate(self, analysis: dict[str, Any]) -> dict[str, Any]:
         "tier3_skipped",
         commit_sha=commit_sha,
         max_severity=max_severity,
+        nivel_risco=nivel_risco,
         findings_count=len(findings),
         reason="below_threshold",
     )
-    scan_job_writer.mark_tier(commit_sha, 3, "skipped")
+    # Persiste a DECISÃO antes de interromper o chain: sem isso o
+    # ``tier3_status`` fica NULL e o dashboard não distingue "pulado por
+    # severidade baixa" de "ainda não chegou nesse tier".
+    scan_job_writer.mark_tier_skipped(commit_sha, 3)
     raise Ignore()
 
 
 def _extract_commit(analysis: dict[str, Any]) -> str:
-    """Best-effort: tenta achar o commit_sha no payload da análise."""
+    """Best-effort: tenta achar o commit_sha no payload da análise.
+
+    A ordem importa. ``tier2_analyze`` injeta ``commit_sha`` no payload de
+    propósito — é a fonte confiável, e a única que existe quando o pipeline
+    produz **zero findings** (hoje, o caso mais comum). A varredura dos
+    findings continua só como rede de segurança para payloads antigos.
+    """
+    sha = analysis.get("commit_sha")
+    if sha:
+        return str(sha)
     for f in analysis.get("findings", []) or []:
         sha = f.get("commit_sha")
         if sha:

@@ -47,18 +47,21 @@ def patched_scanners():
 class TestScannerExecution:
     def test_trivy_always_runs(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
         ).get()
         patched_scanners["trivy"].return_value.run_safe.assert_called_once()
         kwargs = patched_scanners["trivy"].return_value.run_safe.call_args.kwargs
-        assert kwargs["target"] == "/tmp/repo"
+        # O alvo é o checkout efêmero criado pelo worker, não um caminho fixo.
+        assert kwargs["target"]
 
     def test_semgrep_expanded_always_runs(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -67,7 +70,8 @@ class TestScannerExecution:
 
     def test_prowler_runs_when_iac_present(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=["app.py", "main.tf"],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -76,7 +80,8 @@ class TestScannerExecution:
 
     def test_prowler_skipped_when_no_iac(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=["app.py", "test_app.py"],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -85,7 +90,8 @@ class TestScannerExecution:
 
     def test_prowler_skipped_with_empty_changed_files(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -94,7 +100,8 @@ class TestScannerExecution:
 
     def test_cloud_provider_passed_to_prowler(self, patched_scanners):
         tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=["main.tf"],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -117,7 +124,8 @@ class TestAggregationAndDedup:
             _make_finding(source="prowler", title="prowler-1", file_path=None, line_number=None),
         ]
         result = tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=["main.tf"],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -140,7 +148,8 @@ class TestAggregationAndDedup:
         ]
         patched_scanners["trivy"].return_value.run_safe.return_value = []
         result = tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -174,7 +183,8 @@ class TestAggregationAndDedup:
             ),
         ]
         result = tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -194,7 +204,8 @@ class TestSerialization:
             ),
         ]
         result = tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",

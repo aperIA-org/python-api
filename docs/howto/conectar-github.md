@@ -34,12 +34,23 @@ completos estão em `.env.example`:
    URL que `GET /github/connect` gera.
 8. Clique **Create GitHub App** e, na página do App:
    - **App ID** (topo da página) → `GITHUB_APP_ID`
-   - **Generate a private key** → baixa um `.pem`. Guarde o arquivo e aponte
-     `GITHUB_PRIVATE_KEY_PATH` para o caminho dele (montado no container).
+   - **Generate a private key** → baixa um `.pem`. Copie o arquivo para
+     `secrets/` na raiz do repositório: `docker-compose.base.yml` monta essa
+     pasta como `/app/secrets` (read-only) na API e nos workers, que é o
+     caminho sugerido em `GITHUB_PRIVATE_KEY_PATH` no `.env.example`.
+
+     ```bash
+     cp ~/Downloads/seu-app.private-key.pem secrets/github-app.private-key.pem
+     ```
+
+     Os **workers** precisam da chave tanto quanto a API: desde o checkout
+     real, `worker_tier1` e `worker_tier2` clonam o repositório antes de
+     escanear, e para isso emitem o installation token igual à API.
 
 Preencha as 4 variáveis (`GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
 `GITHUB_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`) no `.env` e reinicie a
-API.
+stack (`docker compose -f docker-compose.base.yml up -d`) — a API **e** os
+workers leem essas variáveis.
 
 Se houver um front-end, preencha também `GITHUB_CONNECT_REDIRECT_URL` — é a
 tela para onde o callback devolve o browser depois da instalação. Em
@@ -192,7 +203,8 @@ explicitamente **ativados**:
    ```
 
    `github_account_id` precisa pertencer ao usuário logado — caso contrário
-   a resposta é `404`. `default_branch` é opcional (default `"main"`).
+   a resposta é `404`. `default_branch` é opcional (default `"main"`), e
+   `target_url` também — veja o passo 5 abaixo.
 
    > **O POST é um upsert**, não um "criar". A chave é
    > `(user_id, github_repo_id)`: repetir o POST no mesmo repositório — para
@@ -220,13 +232,80 @@ explicitamente **ativados**:
      -H "Authorization: Bearer $ACCESS_TOKEN"
    ```
 
+   > O `PATCH` é **parcial**: ele aplica só as chaves que você mandar. Omitir
+   > `active` não desativa nada, omitir `target_url` não apaga nada. Um corpo
+   > vazio (`{}`) é recusado com `422` de propósito — assim um payload montado
+   > errado aparece como erro, e não como uma chamada que "funcionou" sem
+   > fazer nada.
+
 A partir do momento em que um repositório está `active=true`, qualquer PR
 aberto ou atualizado nele dispara o pipeline automaticamente, e você também
 pode disparar um scan sob demanda com
 `POST /repositories/{id}/scan` — veja
 [disparar-analise.md](./disparar-analise.md).
 
-## 5. Desconectar uma conta GitHub
+## 5. Informar a URL da aplicação (liberar o DAST do Tier 3)
+
+Os Tiers 1 e 2 analisam **código**; o Tier 3 inclui um **DAST** (OWASP ZAP),
+que precisa de uma aplicação no ar para atacar. Enquanto o repositório não
+tiver uma URL cadastrada, o ZAP é pulado e o log registra
+`reason="no_target_url"` — o resto do pipeline roda normalmente.
+
+O campo é `target_url`, e aponta para onde **aquele** repositório está
+publicado (staging, preview, homologação). É diferente de `url`, que é o
+endereço do repositório no GitHub.
+
+```bash
+curl -s -X PATCH http://localhost:8000/repositories/<repository_id> \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target_url": "https://staging.suaempresa.com"}'
+```
+
+Dá para informar já na ativação, junto do `POST /repositories`. Como o POST é
+upsert, **omitir o campo preserva** a URL que já estiver gravada — reativar um
+repositório não apaga o alvo.
+
+Para **remover** o alvo (e voltar a pular o DAST), mande `null` explícito:
+
+```bash
+curl -s -X PATCH http://localhost:8000/repositories/<repository_id> \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target_url": null}'
+```
+
+> **Aponte só para ambiente que é seu, e que pode apanhar.** O ZAP não navega
+> na URL: ele faz spider e depois **active scan**, disparando payloads reais
+> de SQLi, XSS e path traversal contra tudo que encontrar. Use staging ou
+> preview — nunca produção, nunca o sistema de outra empresa.
+
+### O que a API recusa (`422`)
+
+Aceitar qualquer URL transformaria o aperIA em origem de ataque contra
+terceiros e, com um alvo interno, em um SSRF rodando de dentro da nossa
+rede — o pior caso sendo `http://169.254.169.254`, o endpoint de metadata de
+AWS/GCP/Azure, que devolve credenciais IAM da máquina e as entregaria de volta
+dentro dos findings do relatório. Por isso a validação é restritiva:
+
+| Recusado | Exemplos | `type` no `422` |
+|---|---|---|
+| URL não absoluta ou malformada | `staging.acme.com`, `https://` | `target_url_malformada` |
+| Esquema fora de http/https | `file:///etc/passwd`, `ftp://…` | `target_url_esquema_invalido` |
+| Credenciais embutidas | `https://admin:senha@acme.com` | `target_url_com_credenciais` |
+| Rede interna | `localhost`, `127.0.0.1`, `10.x`, `172.16–31.x`, `192.168.x`, `169.254.169.254`, `::1`, `fe80::/10`, `100.64.0.0/10`, `0.0.0.0`, `http://2130706433`, `*.local`, `*.internal` | `target_url_alvo_bloqueado` |
+| Host sem domínio (só resolve dentro) | `http://zap:8090`, `http://api-interna` | `target_url_host_sem_dominio` |
+| String vazia | `""` (use `null` para limpar) | `target_url_vazia` |
+
+O `msg` de cada erro vem em português e pode ser exibido direto ao usuário; o
+`type` é estável, então dá para tratar cada caso sem comparar string.
+
+> Um domínio público cujo DNS aponta para dentro da rede (DNS rebinding)
+> **não** é pego aqui: resolver DNS no cadastro seria inútil, porque o
+> registro pode mudar entre a validação e o scan. A defesa desse caso é de
+> rede — negar saída do container do ZAP para faixas internas.
+
+## 6. Desconectar uma conta GitHub
 
 ```bash
 curl -s -X DELETE http://localhost:8000/github/accounts/<account_id> \

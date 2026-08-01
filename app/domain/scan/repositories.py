@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 from uuid import UUID
 
 from app.domain.scan.entities import ScanJob
@@ -38,6 +39,35 @@ class ScanJobRepository(ABC):
     @abstractmethod
     def set_final_risk(self, commit_sha: str, score: int | None, level: str | None) -> None:
         """Grava o score e o nível de risco final do scan job."""
+        ...
+
+    @abstractmethod
+    def list_in_progress(self) -> list[ScanJob]:
+        """Lista os jobs com algum tier ainda ``queued``/``running``.
+
+        Conjunto naturalmente pequeno (só o que está em voo) — é a entrada da
+        varredura de jobs travados, que aplica a regra de "sem progresso"
+        (``ScanJob.esta_travado``) no domínio, não em SQL.
+        """
+        ...
+
+    @abstractmethod
+    def fail_pending_tiers(self, commit_sha: str) -> None:
+        """Marca como ``failed`` todo tier ainda ``queued``/``running``.
+
+        Usado para liberar jobs travados: preserva os tiers já concluídos e
+        carimba ``tier*_completed_at`` só nos que foram encerrados agora.
+        """
+        ...
+
+    @abstractmethod
+    def restart_execution(self, commit_sha: str, *, started_at: datetime) -> None:
+        """Reinicia o estado de execução de uma linha já existente.
+
+        Existe porque ``scan_jobs`` tem UNIQUE em ``commit_sha``: um redisparo
+        do mesmo commit reaproveita a linha. Sem reset, os timestamps da
+        execução anterior sobrevivem e a duração exibida vira ficção.
+        """
         ...
 
     @abstractmethod

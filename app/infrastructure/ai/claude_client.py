@@ -28,7 +28,7 @@ from anthropic import Anthropic, AnthropicError
 
 from app.config import settings
 from app.infrastructure.ai.circuit_breaker import DEFAULT_BREAKER, CircuitBreaker
-from app.infrastructure.ai.llm_guard_client import LLMGuardClient
+from app.infrastructure.ai.llm_guard_client import LLMGuardClient, redigir_segredos
 from app.infrastructure.ai.models import FORMATTING, REASONING
 from app.infrastructure.ai.token_metrics import (
     record_request_outcome,
@@ -103,6 +103,21 @@ class ClaudeClient:
         if self._breaker.is_open():
             record_request_outcome(model, "circuit_open")
             raise CircuitOpenError("Claude API circuit breaker is OPEN")
+
+        # Redigir ANTES da guarda, e num único ponto de estrangulamento: toda
+        # chamada ao Claude passa por aqui, independente de qual prompt a
+        # montou. Foi o que o incidente mostrou — o bloqueio não vinha do
+        # `chain_of_events` (que nem inclui `description`) e sim do relatório do
+        # Tier 2, que recebe os findings completos. Redigir no builder teria
+        # consertado um caminho e deixado os outros.
+        user, segredos_redigidos = redigir_segredos(user)
+        if segredos_redigidos:
+            logger.info(
+                "prompt_segredos_redigidos",
+                model=model,
+                commit_sha=commit_sha,
+                total=segredos_redigidos,
+            )
 
         guard_result = self._guard.check(user)
         if not guard_result.safe:

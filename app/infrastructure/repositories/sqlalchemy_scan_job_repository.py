@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.domain.scan.entities import ScanJob
+from app.domain.scan.entities import STATUS_EM_ANDAMENTO, ScanJob
 from app.domain.scan.repositories import ScanJobRepository
 from app.domain.scan.value_objects import ScanTier, TierStatus
 from app.infrastructure.persistence.models.scan_job_model import ScanJobModel
@@ -19,6 +19,11 @@ _TIER_PREFIX = {
 }
 
 _INSERT_COLUMNS = tuple(ScanJobModel.__table__.columns.keys())
+
+# Valores gravados na coluna de status dos tiers ainda não concluídos.
+_VALORES_EM_ANDAMENTO = tuple(status.value for status in STATUS_EM_ANDAMENTO)
+
+_TIER_PREFIXES = ("tier1", "tier2", "tier3")
 
 
 def _to_row(job: ScanJob) -> dict:
@@ -109,6 +114,71 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
             update(ScanJobModel)
             .where(ScanJobModel.commit_sha == commit_sha)
             .values(final_risk_score=score, final_risk_level=level)
+        )
+        self.db.flush()
+
+    def list_in_progress(self) -> list[ScanJob]:
+        result = self.db.execute(
+            select(ScanJobModel)
+            .where(
+                or_(
+                    *(
+                        getattr(ScanJobModel, f"{prefix}_status").in_(
+                            _VALORES_EM_ANDAMENTO
+                        )
+                        for prefix in _TIER_PREFIXES
+                    )
+                )
+            )
+            .order_by(ScanJobModel.created_at.asc())
+        )
+        return [m.to_entity() for m in result.scalars().all()]
+
+    def fail_pending_tiers(self, commit_sha: str) -> None:
+        agora = datetime.utcnow()
+        values: dict = {}
+        for prefix in _TIER_PREFIXES:
+            coluna_status = getattr(ScanJobModel, f"{prefix}_status")
+            coluna_fim = getattr(ScanJobModel, f"{prefix}_completed_at")
+            pendente = coluna_status.in_(_VALORES_EM_ANDAMENTO)
+            # CASE em vez de um UPDATE por tier: um único statement e os tiers
+            # já concluídos ficam intactos (não reescrevemos done/skipped).
+            values[f"{prefix}_status"] = case(
+                (pendente, TierStatus.FAILED.value), else_=coluna_status
+            )
+            values[f"{prefix}_completed_at"] = case(
+                (pendente, agora), else_=coluna_fim
+            )
+
+        self.db.execute(
+            update(ScanJobModel)
+            .where(ScanJobModel.commit_sha == commit_sha)
+            .values(**values)
+        )
+        self.db.flush()
+
+    def restart_execution(self, commit_sha: str, *, started_at: datetime) -> None:
+        # Zera tudo que descreve a execução anterior e recoloca o Tier 1 em
+        # "running" — o mesmo estado com que a linha nasceria se fosse nova.
+        # ``created_at`` NÃO é tocado: ele marca quando o commit entrou no
+        # sistema pela primeira vez.
+        self.db.execute(
+            update(ScanJobModel)
+            .where(ScanJobModel.commit_sha == commit_sha)
+            .values(
+                tier1_status=TierStatus.RUNNING.value,
+                tier1_started_at=started_at,
+                tier1_completed_at=None,
+                tier2_status=None,
+                tier2_started_at=None,
+                tier2_completed_at=None,
+                tier3_status=None,
+                tier3_started_at=None,
+                tier3_completed_at=None,
+                blocked_at_tier=None,
+                final_risk_score=None,
+                final_risk_level=None,
+            )
         )
         self.db.flush()
 

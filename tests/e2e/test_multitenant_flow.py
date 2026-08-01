@@ -152,3 +152,65 @@ def test_webhook_unregistered_repo_is_orphan(client, sqlite_factory, monkeypatch
     assert resp.status_code == 200
     assert captured["user_id"] is None
     assert captured["repository_id"] is None
+
+
+def test_webhook_repassa_target_url_do_repositorio(client, sqlite_factory, monkeypatch):
+    """Gatilho por webhook: o alvo do DAST vem do repositório cadastrado.
+
+    O payload do GitHub não diz onde a aplicação está publicada — quem sabe é
+    o repositório, resolvido pela instalação. Sem isso o Tier 3 continuaria
+    pulando o ZAP mesmo com a URL cadastrada.
+    """
+    user_id = uuid4()
+    with sqlite_factory() as s:
+        SQLAlchemyRepositoryRepository(s).save(
+            Repository(user_id=user_id, github_account_id=uuid4(),
+                       installation_id=777, github_repo_id=888, full_name="acme/web",
+                       url="https://github.com/acme/web", active=True,
+                       target_url="https://staging.acme.com")
+        )
+        s.commit()
+
+    capturado = {}
+    monkeypatch.setattr(orchestrator, "start_pipeline", lambda **kw: capturado.update(kw))
+
+    payload_obj = {
+        "action": "opened",
+        "installation": {"id": 777},
+        "pull_request": {"number": 9, "head": {"sha": "1" * 40}, "base": {"sha": "2" * 40}},
+        "repository": {"id": 888, "clone_url": "https://github.com/acme/web.git",
+                       "full_name": "acme/web"},
+    }
+    payload = json.dumps(payload_obj).encode()
+    resp = client.post("/webhook/github", content=payload, headers={
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": _sign(payload),
+        "X-GitHub-Event": "pull_request",
+    })
+
+    assert resp.status_code == 200
+    assert capturado["target_url"] == "https://staging.acme.com"
+    assert capturado["user_id"] == user_id
+
+
+def test_webhook_sem_repositorio_cadastrado_nao_tem_alvo(client, monkeypatch):
+    """PR de repositório desconhecido: sem dono e sem alvo — ZAP segue pulado."""
+    capturado = {}
+    monkeypatch.setattr(orchestrator, "start_pipeline", lambda **kw: capturado.update(kw))
+
+    payload_obj = {
+        "action": "opened",
+        "installation": {"id": 4242},
+        "pull_request": {"number": 1, "head": {"sha": "3" * 40}, "base": {"sha": "4" * 40}},
+        "repository": {"id": 4343, "clone_url": "https://github.com/x/y.git", "full_name": "x/y"},
+    }
+    payload = json.dumps(payload_obj).encode()
+    resp = client.post("/webhook/github", content=payload, headers={
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": _sign(payload),
+        "X-GitHub-Event": "pull_request",
+    })
+
+    assert resp.status_code == 200
+    assert capturado["target_url"] is None
+    assert capturado["user_id"] is None

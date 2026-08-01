@@ -60,7 +60,8 @@ class TestTier1ScanWorker:
             instance = MockScanner.return_value
             instance.run_safe.return_value = [verified]
             result = tier1_scan_worker.run_trufflehog.delay(
-                repo_path="/tmp",
+                repo_full_name="acme/repo",
+                installation_id=42,
                 base_sha="x",
                 head_sha="y",
                 commit_sha="a" * 40,
@@ -81,7 +82,8 @@ class TestTier1ScanWorker:
             instance = MockScanner.return_value
             instance.run_safe.return_value = [finding]
             tier1_scan_worker.run_semgrep_changed.delay(
-                repo_path="/tmp/repo",
+                repo_full_name="acme/repo",
+                installation_id=42,
                 changed_files=["a.py", "b.py"],
                 commit_sha="a" * 40,
                 repo_url="https://github.com/x/y",
@@ -97,7 +99,8 @@ class TestTier1ScanWorker:
             instance = MockScanner.return_value
             instance.run_safe.return_value = []
             result = tier1_scan_worker.run_trufflehog.delay(
-                repo_path="/tmp",
+                repo_full_name="acme/repo",
+                installation_id=42,
                 base_sha="x",
                 head_sha="y",
                 commit_sha="a" * 40,
@@ -207,6 +210,80 @@ class TestGate1:
         assert ar.state == "IGNORED"
 
 
+class TestGate1PersisteOBloqueio:
+    """Bloqueio do Gate 1 é decisão: T2 e T3 nunca vão rodar neste commit.
+
+    Deixá-los ``NULL`` faz a API/dashboard mostrar o mesmo traço de "ainda não
+    chegou nesse tier".
+    """
+
+    @pytest.fixture
+    def mock_github(self):
+        with patch(
+            "app.presentation.workers.analysis_worker.GitHubClient"
+        ) as MockClient:
+            yield MockClient.return_value
+
+    @pytest.fixture
+    def persistence_on(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from app.config import settings
+        from app.infrastructure.persistence import scan_job_writer
+        from app.infrastructure.persistence.models import (  # noqa: F401 — bind metadata
+            finding_model,
+            refresh_token_model,
+            remediation_model,
+            scan_job_model,
+            user_model,
+        )
+        from app.infrastructure.persistence.models.base import Base
+
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            future=True,
+        )
+        Base.metadata.create_all(eng)
+        factory = sessionmaker(bind=eng, expire_on_commit=False, autoflush=False)
+        original = settings.SCAN_PERSISTENCE_ENABLED
+        settings.SCAN_PERSISTENCE_ENABLED = True
+        with patch.object(scan_job_writer, "SessionLocal", factory):
+            scan_job_writer.create_scan_job(
+                commit_sha="a" * 40,
+                repo_url="https://github.com/acme/repo",
+                installation_id=1,
+            )
+            yield factory
+        settings.SCAN_PERSISTENCE_ENABLED = original
+        eng.dispose()
+
+    def test_bloqueio_marca_t1_done_e_t2_t3_skipped(self, mock_github, persistence_on):
+        from app.domain.scan.value_objects import ScanTier, TierStatus
+        from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
+            SQLAlchemyScanJobRepository,
+        )
+
+        ar = analysis_worker.gate1_check.delay(
+            [[{"secret_verified": True, "source": "trufflehog"}]],
+            repo_full_name="acme/repo",
+            pr_number=7,
+            commit_sha="a" * 40,
+            installation_id=1,
+        )
+        assert ar.state == "IGNORED"
+
+        with persistence_on() as s:
+            job = SQLAlchemyScanJobRepository(s).get_by_commit("a" * 40)
+        assert job.tier1_status == TierStatus.DONE
+        assert job.blocked_at_tier is ScanTier.ONE
+        assert job.tier2_status == TierStatus.SKIPPED
+        assert job.tier3_status == TierStatus.SKIPPED
+
+
 # -----------------------------------------------------------------------------
 # Analysis worker — Tier 2 (Claude)
 # -----------------------------------------------------------------------------
@@ -243,6 +320,28 @@ class TestTier2Analyze:
         kwargs = patched_analysis_claude.call_json.call_args.kwargs
         assert "Findings (1)" in kwargs["user"]
         assert "sem dados CTI disponíveis" in kwargs["user"]
+
+    def test_payload_carrega_o_commit_para_o_gate2(self, patched_analysis_claude):
+        """O Gate 2 só recebe este dict — sem a chave ele fica sem identidade."""
+        patched_analysis_claude.call_json.return_value = {
+            "event_chain": [],
+            "risk_score": {"score": 0, "level": "info"},
+        }
+        result = analysis_worker.tier2_analyze.delay(
+            {"findings": []},
+            commit_sha="a" * 40,
+        ).get()
+        assert result["commit_sha"] == "a" * 40
+
+    def test_payload_degradado_tambem_carrega_o_commit(self, patched_analysis_claude):
+        from app.infrastructure.ai.claude_client import CircuitOpenError
+
+        patched_analysis_claude.call_json.side_effect = CircuitOpenError("open")
+        result = analysis_worker.tier2_analyze.delay(
+            {"findings": []},
+            commit_sha="a" * 40,
+        ).get()
+        assert result["commit_sha"] == "a" * 40
 
     def test_circuit_open_yields_degraded_response(self, patched_analysis_claude):
         from app.infrastructure.ai.claude_client import CircuitOpenError

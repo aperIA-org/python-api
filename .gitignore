@@ -212,3 +212,6 @@ marimo/_lsp/
 __marimo__/
 
 app/secrets/*
+# Chave privada do GitHub App (montada em /app/secrets nos containers).
+secrets/*
+!secrets/README.md

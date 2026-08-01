@@ -43,8 +43,9 @@ Receitas orientadas a objetivo (assumem que você já conhece o básico):
 ## Explanation
 
 - **[O pipeline por dentro](explicacao-pipeline.md)** — arquitetura de 3 tiers,
-  canvas/bridges, gates vs. score do Claude, filosofia best-effort e o modelo de
-  isolamento multi-tenant.
+  canvas/bridges, gates vs. score do Claude, filosofia best-effort, o modelo de
+  isolamento multi-tenant e por que jobs travados existem (assimetria de
+  durabilidade entre Postgres e Redis) e como o sistema se recupera deles.
 
 ---
 

@@ -15,7 +15,9 @@
 
 services:
   zap:
-    image: zaproxy/zap-stable:2.14.0
+    # Tags <= 2.14.0 não existem neste repositório: o ZAP migrou de
+    # owasp/zap2docker-stable para zaproxy/zap-stable só a partir do 2.15.0.
+    image: zaproxy/zap-stable:2.16.1
     container_name: aperia-zap
     command:
       - zap.sh

@@ -29,6 +29,9 @@ class RepositoryModel(Base):
     url = Column(Text)
     default_branch = Column(String(255))
     active = Column(Boolean, nullable=False, default=True)
+    # Alvo do DAST (ZAP/Tier 3). Nullable: a maioria dos repositórios não tem
+    # um deploy conhecido. Ver `app/domain/github/target_url.py`.
+    target_url = Column(Text)
     created_at = Column(DateTime, nullable=False)
 
     @classmethod
@@ -43,6 +46,7 @@ class RepositoryModel(Base):
             url=repository.url,
             default_branch=repository.default_branch,
             active=repository.active,
+            target_url=repository.target_url,
             created_at=repository.created_at,
         )
 
@@ -57,5 +61,6 @@ class RepositoryModel(Base):
             url=self.url,
             default_branch=self.default_branch,
             active=self.active,
+            target_url=self.target_url,
             created_at=self.created_at,
         )

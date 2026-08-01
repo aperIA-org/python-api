@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.github.entities import Repository
@@ -23,6 +23,24 @@ _INSERT_COLUMNS = tuple(RepositoryModel.__table__.columns.keys())
 def _to_row(repository: Repository) -> dict:
     model = RepositoryModel.from_entity(repository)
     return {col: getattr(model, col) for col in _INSERT_COLUMNS}
+
+
+def _upsert_set(stmt) -> dict:
+    """Colunas sobrescritas quando o upsert cai no conflito.
+
+    ``target_url`` fica **fora** de ``_UPDATE_COLUMNS`` e entra aqui com
+    ``COALESCE``: o ``POST /repositories`` é upsert e o payload de ativação
+    normalmente não repete a URL de aplicação. Sem o ``COALESCE``, reativar um
+    repositório (POST repetido) apagaria silenciosamente a URL já configurada
+    e o DAST voltaria a ser pulado sem ninguém pedir. Com ele, o POST
+    **define ou atualiza** quando a URL vem preenchida e **preserva** quando
+    vem ausente — limpar é operação explícita do ``PATCH`` (``null``).
+    """
+    valores = {col: getattr(stmt.excluded, col) for col in _UPDATE_COLUMNS}
+    valores["target_url"] = func.coalesce(
+        stmt.excluded.target_url, RepositoryModel.target_url
+    )
+    return valores
 
 
 class SQLAlchemyRepositoryRepository(RepositoryRepository):
@@ -49,7 +67,7 @@ class SQLAlchemyRepositoryRepository(RepositoryRepository):
             stmt = pg_insert(RepositoryModel).values(row)
             stmt = stmt.on_conflict_do_update(
                 constraint="repositories_user_repo_key",
-                set_={col: getattr(stmt.excluded, col) for col in _UPDATE_COLUMNS},
+                set_=_upsert_set(stmt),
             )
             return self._execute_returning(stmt)
 
@@ -59,7 +77,7 @@ class SQLAlchemyRepositoryRepository(RepositoryRepository):
             stmt = sqlite_insert(RepositoryModel).values(row)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["user_id", "github_repo_id"],
-                set_={col: getattr(stmt.excluded, col) for col in _UPDATE_COLUMNS},
+                set_=_upsert_set(stmt),
             )
             return self._execute_returning(stmt)
 
@@ -79,10 +97,15 @@ class SQLAlchemyRepositoryRepository(RepositoryRepository):
             )
             if existing is None:
                 raise
+            valores = {col: row[col] for col in _UPDATE_COLUMNS}
+            # Mesmo COALESCE do caminho com ON CONFLICT, escrito como omissão:
+            # sem URL no payload, a coluna simplesmente não entra no UPDATE.
+            if row["target_url"] is not None:
+                valores["target_url"] = row["target_url"]
             self.db.execute(
                 update(RepositoryModel)
                 .where(RepositoryModel.id == existing.id)
-                .values(**{col: row[col] for col in _UPDATE_COLUMNS})
+                .values(**valores)
             )
             self.db.flush()
             return self.get_by_id(existing.id)
@@ -140,6 +163,19 @@ class SQLAlchemyRepositoryRepository(RepositoryRepository):
             update(RepositoryModel)
             .where(RepositoryModel.id == repository_id)
             .values(active=active)
+        )
+        self.db.flush()
+
+    def set_target_url(self, repository_id: UUID, target_url: str | None) -> None:
+        """Define ou limpa (``None``) o alvo de DAST do repositório.
+
+        ``None`` aqui é sempre intenção explícita de limpar — quem chama já
+        distinguiu "não informei" de "quero remover" antes de chegar aqui.
+        """
+        self.db.execute(
+            update(RepositoryModel)
+            .where(RepositoryModel.id == repository_id)
+            .values(target_url=target_url)
         )
         self.db.flush()
 

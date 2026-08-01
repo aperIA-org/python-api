@@ -69,4 +69,6 @@ Git: branch principal `main`. Execução detalhada em `GUIA_EXECUCAO.md` e `READ
 
 - `RiskScorer` determinístico **não está plugado** (score vem do Claude).
 - `/metrics` Prometheus **não exposto** (counters existem em `token_metrics.py`).
-- Checkout real do repo é pós-MVP — `repo_path` é stub, scans locais retornam 0 findings.
+- ZAP (DAST) roda quando o repositório tem `target_url` cadastrada (a URL da aplicação
+  publicada). Sem ela o Tier 3 registra `reason="no_target_url"` e faz só a análise de
+  código. A validação recusa alvos internos — um scan DAST dispara requisições ativas.

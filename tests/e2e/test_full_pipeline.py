@@ -175,7 +175,6 @@ def _kickoff(**overrides):
         pr_number=7,
         installation_id=42,
         repo_full_name="acme/repo",
-        repo_path="/tmp/repo",
         base_sha="b" * 40,
         head_sha="a" * 40,
         changed_files=["app/db.py"],

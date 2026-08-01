@@ -56,7 +56,7 @@ app/
 
 ## O pipeline de scan (Celery canvas)
 
-Definido em `app/core/orchestrator.py` (`build_pipeline_canvas` / `start_pipeline`). Dois gatilhos, um único ponto de disparo — `dispatch_pipeline` em `app/application/use_cases/trigger_scan_use_case.py`, onde vivem os argumentos "de MVP" do canvas:
+Definido em `app/core/orchestrator.py` (`build_pipeline_canvas` / `start_pipeline`). Dois gatilhos, um único ponto de disparo — `dispatch_pipeline` em `app/application/use_cases/trigger_scan_use_case.py`, onde os argumentos do canvas são montados:
 
 - `POST /webhook/github` — HMAC obrigatório; actions `opened`/`synchronize`.
 - `POST /repositories/{id}/scan` — scan manual no HEAD do `default_branch` (`TriggerRepositoryScanUseCase` resolve o SHA via `GitHubClient.get_branch_head_sha`), com `pr_number=None`.
@@ -91,6 +91,8 @@ group(run_trufflehog, run_semgrep_changed)          [tier1]
 - **Dicts, não entidades, atravessam o canvas** — Celery serializa JSON. Workers convertem `Finding` → dict via `_findings_to_dicts` antes de retornar.
 - **Bridges** são tasks mínimas no orchestrator que combinam o output da task anterior com state fixo (`commit_sha` etc.). Em modo eager, `Ignore()` upstream vira `None` → cada bridge checa `if not input: return None` (propaga a parada sem side-effects).
 - **Idempotência:** `task_acks_late=True`; persistência usa `ON CONFLICT DO NOTHING`.
+- **Checkout por tarefa** — o canvas não carrega `repo_path`. Cada task de T1/T2 clona o commit via `checkout_para_scan` (`presentation/workers/checkout_guard.py` → `infrastructure/git/repo_checkout.py`): fetch raso do SHA exato, token do App por `GIT_CONFIG_*` (nunca em argv nem no `.git/config`), redigido como `***` em log/erro, diretório apagado no `finally`. Os containers de T1 e T2 não compartilham filesystem — por isso cada um faz o seu.
+- **Checkout falho NÃO é best-effort** — sem árvore não há scan; a task falha e o guard chama `scan_job_writer.fail_pending_tiers` para o `ScanJob` não ficar preso em `running`.
 
 ## Integração Claude (`app/infrastructure/ai/`)
 
@@ -106,7 +108,7 @@ group(run_trufflehog, run_semgrep_changed)          [tier1]
 
 - **BaseScanner.run_safe()** — padrão de **isolamento de falha**: qualquer exceção em `scan()` é logada (`scanner_skipped`) e vira `[]`. Scanner indisponível ≠ pipeline quebrado (aceita falso-negativo, evita falso-positivo).
 - Severidade nativa de cada scanner → enum canônico `Severity` (CRITICAL/HIGH/MEDIUM/LOW/INFO). TruffleHog sempre CRITICAL (`--only-verified`). Semgrep ERROR→HIGH/WARNING→MEDIUM/INFO→LOW.
-- Semgrep tem `scan_changed` (T1, só diff) e `scan_expanded` (T2, repo inteiro via `_SemgrepExpandedAdapter`). Prowler só roda se `has_iac_files(changed_files)`.
+- Semgrep tem `scan_changed` (T1, escopo do diff; **lista vazia = árvore inteira**) e `scan_expanded` (T2, repo inteiro via `_SemgrepExpandedAdapter`). O diff é calculado no checkout (`listar_arquivos_alterados`, `git diff base..head`) quando `base_sha != commit_sha`; scan manual de branch não tem base → varre tudo. Prowler só roda se `has_iac_files(...)` sobre esse mesmo diff.
 - **OpenCTIClient**: CVE → TTPs MITRE via GraphQL; falha → `None`. **CalderaClient**: emulação adversária em sandbox; valida `CALDERA_SANDBOX_MODE` no `__init__` (senão `SandboxViolationError`); retorna **métricas** (dict), não findings.
 - **GitHub**: `github_auth` gera JWT do App + installation token por chamada; `github_client` posta status checks, comentários e code suggestions.
 
@@ -162,5 +164,4 @@ Git: branch principal `main`. Docs de execução detalhadas em `GUIA_EXECUCAO.md
 
 - `RiskScorer` determinístico não está plugado (score vem do Claude); `_cti_component` lê `active_campaigns` mas o scan T3 produz `active_threat` (divergência latente).
 - `/metrics` Prometheus **não exposto** (counters existem em `token_metrics.py`, falta `make_asgi_app()`).
-- Checkout real do repo é "pós-MVP" — `repo_path` é stub (`/tmp/aperia/<sha>`), então scans reais retornam 0 findings localmente.
-- `changed_files`/`target_url` chegam vazios/None no MVP — definidos em `dispatch_pipeline`, valem para os dois gatilhos.
+- ZAP (DAST) roda quando o repositório tem `target_url` cadastrada; sem ela o Tier 3 registra `reason="no_target_url"` e analisa só o código.

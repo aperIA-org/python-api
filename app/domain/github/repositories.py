@@ -71,6 +71,16 @@ class RepositoryRepository(ABC):
         ...
 
     @abstractmethod
+    def set_target_url(self, repository_id: UUID, target_url: str | None) -> None:
+        """Define ou limpa a URL de aplicação (alvo do DAST) do repositório.
+
+        ``None`` significa **limpar** — a ausência do campo no payload é
+        resolvida antes, na camada de apresentação; aqui a intenção já é
+        inequívoca.
+        """
+        ...
+
+    @abstractmethod
     def delete(self, repository_id: UUID) -> None:
         """Remove um repositório pelo seu identificador único."""
         ...

@@ -1,12 +1,16 @@
 # Tutorial: seu primeiro scan no aperIA
 
-Neste tutorial vamos subir a stack completa do aperIA localmente e disparar um
-scan de segurança de ponta a ponta: do webhook do GitHub até o resultado do
-pipeline nos logs dos workers. Ao final, você vai ter visto o canvas Celery
-inteiro rodar — Tier 1, Gate 1, Tier 2, análise do Claude, Gate 2 — sem
-precisar de nenhuma credencial externa: **sem GitHub App, sem chave da
-Anthropic e sem domínio público**. O resultado vem degradado (falamos disso no
-passo 4), e está tudo bem — é exatamente o que esperamos ver aqui.
+Neste tutorial vamos subir a stack completa do aperIA localmente e disparar o
+pipeline de segurança: do webhook do GitHub até o resultado nos logs dos
+workers. Tudo isso **sem nenhuma credencial externa** — sem GitHub App, sem
+chave da Anthropic e sem domínio público.
+
+O preço de não ter credencial é que a análise não vai até o fim: sem o GitHub
+App, os workers não conseguem baixar o código do commit e o Tier 1 falha no
+checkout (falamos disso em "O que você acabou de ver"). O que este tutorial
+mostra, então, é o **encanamento**: assinatura do webhook, fila, workers,
+persistência e o registro honesto de uma falha. Para ver a análise de verdade,
+o próximo passo é conectar um repositório real.
 
 ## Pré-requisitos
 
@@ -112,29 +116,38 @@ docker compose -f docker-compose.base.yml logs -f \
   worker_tier1 worker_tier2 worker_analysis
 ```
 
-Deixe rodando por alguns segundos e observe as etapas passando: Tier 1
-(TruffleHog + Semgrep), Gate 1, Tier 2 (scan), análise do Claude e Gate 2.
-Pressione `Ctrl+C` quando quiser parar de acompanhar — os containers
-continuam de pé.
+Deixe rodando por alguns segundos. O worker de Tier 1 recebe a tarefa, tenta
+fazer o checkout do commit e registra `scan_checkout_falhou` — o repositório
+do payload é fictício e não há App instalado para autenticar. Pressione
+`Ctrl+C` quando quiser parar de acompanhar — os containers continuam de pé.
 
 ## O que você acabou de ver
 
-Sem checkout real do repositório e sem créditos na conta Anthropic, o
-pipeline roda de ponta a ponta, mas com resultado degradado. É esperado ver:
+Com um repositório de demonstração inventado no payload e sem créditos na
+conta Anthropic, o encanamento inteiro é exercitado — HMAC, fila, worker,
+persistência — mas a análise em si não vai longe. É esperado ver:
 
-- **Tier 1 com 0 findings**: o `repo_path` é um stub (`/tmp/aperia/<sha>`) —
-  não existe checkout real do código ainda (isso é pós-MVP). Os scanners
-  logam `scanner_skipped ... No such file or directory` e seguem.
-- **Gate 1 passa**: sem findings, não há `secret_verified`, então o PR não é
-  bloqueado e o canvas continua para o Tier 2.
-- **Tier 2 também sem findings relevantes**: os scanners rodam, mas sobre o
-  mesmo stub vazio.
-- **Análise do Claude degradada**: sem `ANTHROPIC_API_KEY` (ou sem créditos),
-  a chamada falha e o worker devolve `{"degraded": true, ...}` em vez de
-  travar o pipeline — é a filosofia best-effort do aperIA em ação.
+- **Tier 1 falhando no checkout**: os workers clonam o commit antes de
+  escanear. Como `OCR-aperIA/demo-repo` e o SHA acima não existem (ou o App
+  não tem acesso a eles), o log mostra `scan_checkout_falhou` e as tarefas
+  falham — de propósito: sem os arquivos não há o que escanear, e concluir
+  "0 findings" seria uma afirmação falsa. Os tiers pendentes são marcados
+  como `failed`, então o commit não fica preso em `running`. Para ver o
+  pipeline inteiro com dados reais, use um repositório conectado de verdade
+  (veja [howto/conectar-github.md](howto/conectar-github.md)) e um commit que
+  exista nele.
+- **O canvas para no Tier 1**: uma tarefa que falha interrompe a chain, então
+  Gate 1, Tier 2 e os relatórios não chegam a rodar. O `ScanJob` fica com os
+  tiers pendentes em `failed` — visível em `GET /scans/<commit_sha>`.
+- **Quando o pipeline chega ao Claude, ele degrada em vez de quebrar**: sem
+  `ANTHROPIC_API_KEY` (ou sem créditos), a chamada falha e o worker devolve
+  `{"degraded": true, ...}` em vez de travar o pipeline — é a filosofia
+  best-effort do aperIA em ação. (Você verá isso assim que rodar com um
+  repositório real.)
 
-Ou seja: o encanamento inteiro funciona — webhook, fila, gates, persistência —
-mesmo sem nenhuma peça externa configurada.
+Ou seja: webhook, assinatura, fila, workers e persistência funcionam mesmo sem
+nenhuma peça externa configurada. O conteúdo da análise, esse depende de um
+repositório real (para o checkout) e da chave da Anthropic (para o Claude).
 
 ## Próximos passos
 

@@ -133,7 +133,6 @@ def build_pipeline_canvas(
     pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
-    repo_path: str,
     base_sha: str,
     head_sha: str,
     changed_files: list[str],
@@ -147,18 +146,26 @@ def build_pipeline_canvas(
     ``pr_number=None`` é um scan de branch (manual): o canvas é idêntico, só
     não há PR onde comentar — os workers de report pulam o post e mantêm o
     relatório apenas na projeção consumível via API.
+
+    O canvas **não** carrega ``repo_path``: cada task que precisa dos arquivos
+    faz o próprio checkout efêmero a partir de ``repo_full_name`` +
+    ``commit_sha`` + ``installation_id``, porque os workers de T1 e T2 rodam em
+    containers sem filesystem comum (ver ``infrastructure/git/repo_checkout``).
     """
     tier1_group = group(
         tier1_scan_worker.run_trufflehog.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             base_sha=base_sha,
             head_sha=head_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         ),
         tier1_scan_worker.run_semgrep_changed.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             changed_files=changed_files,
+            base_sha=base_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         ),
@@ -176,8 +183,10 @@ def build_pipeline_canvas(
         )
         # Gate1 passou — agora roda Tier 2 (Trivy + Semgrep expanded + Prowler)
         | _t1_to_t2_scan_bridge.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             changed_files=changed_files,
+            base_sha=base_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         )
@@ -219,8 +228,10 @@ def _t1_to_t2_scan_bridge(
     self,
     gate1_output: dict[str, Any] | None,
     *,
-    repo_path: str,
+    repo_full_name: str,
+    installation_id: int,
     changed_files: list[str],
+    base_sha: str,
     commit_sha: str,
     repo_url: str,
 ) -> dict[str, Any] | None:
@@ -235,8 +246,10 @@ def _t1_to_t2_scan_bridge(
         return None
     t1_findings = gate1_output.get("findings", []) or []
     t2_findings = tier2_scan_worker.run_tier2_scan.run(
-        repo_path=repo_path,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
         changed_files=changed_files,
+        base_sha=base_sha,
         commit_sha=commit_sha,
         repo_url=repo_url,
     )
@@ -279,7 +292,6 @@ def start_pipeline(
     pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
-    repo_path: str,
     base_sha: str,
     head_sha: str,
     changed_files: list[str],
@@ -292,10 +304,34 @@ def start_pipeline(
     Retorna o ``AsyncResult`` do canvas — útil em testes para
     inspecionar state. Em produção o webhook ignora o retorno.
     """
-    # Projeção consumível via API (GET /scans): cria o ScanJob com o Tier 1
-    # já em "running". Best-effort — falha de banco não impede o pipeline.
+    from app.core.exceptions import ScanDispatchError
     from app.infrastructure.persistence import scan_job_writer
 
+    # ORDEM IMPORTA. O canvas é montado ANTES de a linha do ``ScanJob`` existir.
+    #
+    # Era o contrário, e o resultado aparecia direto na cara do usuário: o
+    # canvas estourava (chord sem result backend), a API devolvia 500 dizendo
+    # "não foi possível iniciar o scan", e o scan aparecia no dashboard "em
+    # execução" — porque a linha já tinha sido gravada pelo passo anterior.
+    # Erro e evidência se contradiziam.
+    #
+    # Montar primeiro faz a falha acontecer enquanto ainda não há nada para
+    # desfazer: nenhuma linha é criada, e o dashboard não mostra um scan que
+    # nunca foi enfileirado.
+    canvas = build_pipeline_canvas(
+        commit_sha=commit_sha,
+        repo_url=repo_url,
+        pr_number=pr_number,
+        installation_id=installation_id,
+        repo_full_name=repo_full_name,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        changed_files=changed_files,
+        target_url=target_url,
+    )
+
+    # Projeção consumível via API (GET /scans): cria o ScanJob com o Tier 1
+    # já em "running". Best-effort — falha de banco não impede o pipeline.
     scan_job_writer.create_scan_job(
         commit_sha=commit_sha,
         repo_url=repo_url,
@@ -306,22 +342,27 @@ def start_pipeline(
         repository_id=repository_id,
     )
 
-    canvas = build_pipeline_canvas(
-        commit_sha=commit_sha,
-        repo_url=repo_url,
-        pr_number=pr_number,
-        installation_id=installation_id,
-        repo_full_name=repo_full_name,
-        repo_path=repo_path,
-        base_sha=base_sha,
-        head_sha=head_sha,
-        changed_files=changed_files,
-        target_url=target_url,
-    )
+    try:
+        resultado = canvas.apply_async()
+    except Exception as exc:
+        # A linha já existe neste ponto. Deixá-la ``running`` recriaria o
+        # órfão: nada a concluiria, e a guarda de concorrência bloquearia
+        # aquele commit com 409 até a varredura de jobs travados.
+        logger.error(
+            "pipeline_dispatch_falhou",
+            commit_sha=commit_sha,
+            repo=repo_full_name,
+            error=str(exc),
+        )
+        scan_job_writer.fail_pending_tiers(commit_sha, motivo=f"dispatch: {exc}")
+        raise ScanDispatchError(
+            f"nao foi possivel enfileirar o pipeline do commit {commit_sha}: {exc}"
+        ) from exc
+
     logger.info(
         "pipeline_dispatched",
         commit_sha=commit_sha,
         pr_number=pr_number,
         repo=repo_full_name,
     )
-    return canvas.apply_async()
+    return resultado

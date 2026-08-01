@@ -11,7 +11,41 @@ que os 8 containers da stack base estão de pé.
   gere análise de verdade. Sem ela o pipeline roda, mas degrada — ver
   [tutorial-primeiro-scan.md](../tutorial-primeiro-scan.md).
 
-## 1. Subir a stack base
+## 1. Colocar a chave do GitHub App em `secrets/`
+
+A chave privada `.pem` do GitHub App **não vai para dentro da imagem** — ela
+entra por bind mount. `app/secrets/`, `secrets/` e `**/*.pem` estão no
+`.dockerignore` justamente para isso: chave assada na imagem viaja em toda
+camada, todo cache de registry e todo `docker push`.
+
+Copie o `.pem` que o GitHub gerou (nome no formato
+`<slug>.<AAAA-MM-DD>.private-key.pem`) para `secrets/`, mantendo o nome, e
+aponte o `.env` para o caminho **absoluto de dentro do container**:
+
+```bash
+cp ~/Downloads/aperia-aspm.2026-07-28.private-key.pem secrets/
+chmod 600 secrets/aperia-aspm.2026-07-28.private-key.pem
+```
+
+```dotenv
+# .env
+GITHUB_PRIVATE_KEY_PATH=/app/secrets/aperia-aspm.2026-07-28.private-key.pem
+```
+
+O `docker-compose.base.yml` monta `./secrets:/app/secrets:ro` em `api`,
+`worker_tier1`, `worker_tier2`, `worker_analysis` e `worker_reporting` — todos
+os serviços que emitem *installation token*. `worker_tier3` não monta porque não
+fala com o GitHub.
+
+> **Gotcha:** o valor de `GITHUB_PRIVATE_KEY_PATH` tem que bater exatamente com
+> o nome do arquivo dentro de `secrets/`. Se divergir (ou se você usar um
+> caminho relativo, que o container resolveria a partir do WORKDIR `/app`), o
+> `get_installation_token()` estoura `FileNotFoundError` e o pipeline morre
+> antes do checkout — sem token os workers de T1/T2 não clonam o repositório.
+> Fora do Docker não existe `/app`: exporte o caminho do host na hora de rodar
+> o uvicorn no `.venv`. Ver [`secrets/README.md`](../../secrets/README.md).
+
+## 2. Subir a stack base
 
 ```bash
 docker compose -f docker-compose.base.yml up -d
@@ -27,8 +61,19 @@ Isso sobe 8 containers:
 | `worker_tier3` | python-api-worker_tier3-1 | — | Celery `tier3`, concurrency 1 |
 | `worker_analysis` | python-api-worker_analysis-1 | — | Celery `analysis`, concurrency 2 |
 | `worker_reporting` | python-api-worker_reporting-1 | — | Celery `reporting`, concurrency 2 |
-| `redis` | aperia-redis | — | Broker + result backend |
-| `db` | aperia-db | — | PostgreSQL 15 (`postgres/postgres`, db `aperia`) |
+| `redis` | aperia-redis | — | Broker + result backend (AOF ligado, volume `aperia_redis_data`) |
+| `db` | aperia-db | — | PostgreSQL 15 (`postgres/postgres`, db `aperia`), volume `aperia_db_data` |
+
+> **Volumes — por que o Redis tem um:** o Postgres guarda a *projeção* do scan
+> (a linha em `scan_jobs`) e o Redis guarda o *trabalho* (as tarefas Celery na
+> fila). Enquanto só o Postgres tinha volume, um `docker compose down` entre o
+> disparo e o consumo da fila apagava as tarefas e preservava a linha — um
+> `ScanJob` órfão, preso em `running`, que ainda por cima bloqueava novos scans
+> daquele commit (`409`). Hoje o Redis sobe com `--appendonly yes` e volume
+> próprio. Se você **quiser** descartar tudo, é `docker compose -f
+> docker-compose.base.yml down -v` (apaga banco **e** fila). E se um job ainda
+> assim ficar preso, a API o libera sozinha no próximo boot — ver
+> `SCAN_STALE_AFTER_MINUTES` em [referencia.md](../referencia.md).
 
 > **Gotcha do `.env`:** o `docker-compose.base.yml` injeta
 > `DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/aperia`, que
@@ -43,7 +88,7 @@ mudar código Python):
 docker compose -f docker-compose.base.yml up -d --build
 ```
 
-## 2. Subir camadas opcionais (se precisar)
+## 3. Subir camadas opcionais (se precisar)
 
 Para exercitar o Tier 3 (ZAP, OpenCTI, Caldera):
 
@@ -65,7 +110,7 @@ docker compose -f docker-compose.base.yml -f docker-compose.observability.yml up
 
 Isso expõe Prometheus em `:9090` e Grafana em `:3000` (login `admin`/`changeme`).
 
-## 3. Aplicar as migrations
+## 4. Aplicar as migrations
 
 ```bash
 docker compose -f docker-compose.base.yml exec api alembic upgrade head
@@ -74,7 +119,7 @@ docker compose -f docker-compose.base.yml exec api alembic upgrade head
 Sem esse passo, a tabela `findings` não existe e a persistência de findings
 cai no ramo best-effort (só loga um warning e segue).
 
-## 4. Confirmar que subiu
+## 5. Confirmar que subiu
 
 ```bash
 curl -s http://localhost:8000/health          # {"status":"ok"}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -114,6 +116,83 @@ def test_set_final_risk(session):
     job = repo.get_by_commit("a" * 40)
     assert job.final_risk_score == 82
     assert job.final_risk_level == "high"
+
+
+def test_list_in_progress_ignora_jobs_concluidos(session):
+    repo = SQLAlchemyScanJobRepository(session)
+    repo.save(_make_job("a" * 40, tier1_status=TierStatus.RUNNING))
+    repo.save(_make_job("b" * 40, tier1_status=TierStatus.DONE, tier2_status=TierStatus.QUEUED))
+    repo.save(
+        _make_job(
+            "c" * 40,
+            tier1_status=TierStatus.DONE,
+            tier2_status=TierStatus.DONE,
+            tier3_status=TierStatus.SKIPPED,
+        )
+    )
+    session.commit()
+
+    em_andamento = {j.commit_sha for j in repo.list_in_progress()}
+    assert em_andamento == {"a" * 40, "b" * 40}
+
+
+def test_fail_pending_tiers_preserva_tiers_concluidos(session):
+    repo = SQLAlchemyScanJobRepository(session)
+    repo.save(
+        _make_job(
+            "a" * 40,
+            tier1_status=TierStatus.DONE,
+            tier1_completed_at=datetime(2026, 7, 31, 5, 30),
+            tier2_status=TierStatus.RUNNING,
+        )
+    )
+    session.commit()
+
+    repo.fail_pending_tiers("a" * 40)
+    session.commit()
+
+    job = repo.get_by_commit("a" * 40)
+    assert job.tier1_status == TierStatus.DONE  # concluído não é reescrito
+    assert job.tier1_completed_at == datetime(2026, 7, 31, 5, 30)
+    assert job.tier2_status == TierStatus.FAILED
+    assert job.tier2_completed_at is not None
+    assert job.tier3_status is None  # tier que nunca rodou continua vazio
+
+
+def test_restart_execution_zera_a_execucao_anterior(session):
+    repo = SQLAlchemyScanJobRepository(session)
+    criado_em = datetime(2026, 7, 31, 5, 30)
+    repo.save(
+        _make_job(
+            "a" * 40,
+            created_at=criado_em,
+            tier1_status=TierStatus.DONE,
+            tier1_started_at=criado_em,
+            tier1_completed_at=datetime(2026, 8, 1, 3, 39),
+            tier2_status=TierStatus.FAILED,
+            tier2_started_at=datetime(2026, 8, 1, 3, 39),
+            tier3_status=TierStatus.SKIPPED,
+            blocked_at_tier=ScanTier.TWO,
+            final_risk_score=80,
+            final_risk_level="high",
+        )
+    )
+    session.commit()
+
+    novo_inicio = datetime(2026, 8, 1, 10, 0)
+    repo.restart_execution("a" * 40, started_at=novo_inicio)
+    session.commit()
+
+    job = repo.get_by_commit("a" * 40)
+    assert job.tier1_status == TierStatus.RUNNING
+    assert job.tier1_started_at == novo_inicio
+    assert job.tier1_completed_at is None
+    assert job.tier2_status is None and job.tier2_started_at is None
+    assert job.tier3_status is None
+    assert job.blocked_at_tier is None
+    assert job.final_risk_score is None and job.final_risk_level is None
+    # created_at é a entrada do commit no sistema — não muda no redisparo.
+    assert job.created_at == criado_em
 
 
 def test_list_recent_and_count(session):

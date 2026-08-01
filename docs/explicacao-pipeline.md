@@ -62,10 +62,10 @@ PR (`POST /webhook/github`) e o scan manual
 (`POST /repositories/{id}/scan`) — mas um **único ponto de disparo**:
 `dispatch_pipeline`, em
 `app/application/use_cases/trigger_scan_use_case.py`. Os dois caminhos
-chamam essa função, o que é uma decisão deliberada: os argumentos ainda
-provisórios do MVP (o `repo_path` stub, o `changed_files` vazio, o
-`target_url` ausente) ficam definidos em um lugar só, e nenhum dos gatilhos
-tem como divergir do outro. O que o scan manual acrescenta — e o webhook
+chamam essa função, o que é uma decisão deliberada: os argumentos do canvas
+(entre eles o `changed_files` vazio e o `target_url` ainda ausente, ver §8)
+ficam definidos em um lugar só, e nenhum dos gatilhos tem como divergir do
+outro. O que o scan manual acrescenta — e o webhook
 recebe de graça no payload do GitHub — é o commit a analisar: sem PR, o use
 case resolve ao vivo o HEAD do `default_branch` e verifica que ainda não há
 um scan em andamento para aquele SHA.
@@ -401,3 +401,376 @@ provável (o `state` de 10 minutos que expirou enquanto a pessoa escolhia
 repositórios no GitHub) se resolve com um clique em "tentar de novo", que
 chama `/github/connect` e gera um `state` novo. O `400` continua existindo
 para quando não há URL configurada — aí não há front para onde voltar.
+
+---
+
+## 7. Jobs travados e a assimetria de durabilidade entre Postgres e Redis
+
+Um `ScanJob` do aperIA existe em dois lugares ao mesmo tempo, e por muito
+tempo esses dois lugares tiveram durabilidades diferentes. Quando um scan é
+disparado, a API faz duas coisas em sequência: grava a linha em `scan_jobs`
+(Postgres) com o Tier 1 já em `running`, e publica as tarefas do tier 1 no
+Redis, que é o broker do Celery. A linha é a **projeção** do scan, o que a API
+mostra em `GET /scans`; a tarefa na fila é o **trabalho** de verdade, o que
+faz o pipeline andar. Se as duas não sobrevivem às mesmas falhas, o sistema
+passa a conseguir afirmar coisas que não são verdade.
+
+Era exatamente esse o caso. O `docker-compose.base.yml` declarava um único
+volume nomeado, o do Postgres; o `redis:7-alpine` subia sem volume e com
+`appendonly no`, ou seja, com a fila inteira na memória do container. Bastava
+recriar a stack — um `docker compose down`, um rebuild após mudar código, um
+reinício da máquina — entre o disparo e o momento em que um worker consumisse
+a fila para que as tarefas evaporassem. A linha no Postgres, essa, sobrevivia:
+órfã, dizendo `tier1_status = running` sem que existisse mais nada no sistema
+capaz de concluí-la. Foi assim que um scan real ficou permanentemente preso em
+"running".
+
+O estrago não parava na projeção mentirosa. `TriggerRepositoryScanUseCase`
+recusa um disparo com `409` quando já existe um scan em andamento para aquele
+commit — uma proteção sensata contra duplicar o pipeline. Só que
+`scan_jobs.commit_sha` é UNIQUE: todo redisparo daquele commit cai na **mesma
+linha**, a órfã, que continua dizendo `running`. O resultado é que o commit
+virava permanentemente não-escaneável, e o único caminho de recuperação era um
+`UPDATE` manual no banco. Uma proteção contra concorrência tinha se
+transformado, na presença de uma falha de infraestrutura, em prisão perpétua.
+
+A correção tem duas metades, e é importante entender por que nenhuma das duas
+sozinha bastaria. A primeira é remover a assimetria: o Redis passou a rodar
+com `--appendonly yes` e um volume `aperia_redis_data:/data`, de modo que a
+fila persiste no disco e sobrevive a um `down`/`up` como os dados do Postgres
+sempre sobreviveram. Isso elimina a causa raiz do incidente concreto, mas não
+elimina a **classe** do problema: um worker que morre no meio de uma task, uma
+fila purgada à mão, uma task que estoura um timeout e some — todos continuam
+capazes de produzir uma linha órfã. Persistência do broker reduz a frequência,
+não a possibilidade.
+
+A segunda metade é assumir que jobs órfãos vão acontecer e dar ao sistema uma
+forma de se recuperar sozinho. A regra que define isso mora no domínio, no
+próprio `ScanJob`: um job está **travado** quando diz estar em andamento
+(algum tier `queued`/`running`) e não dá sinal de vida há mais que
+`SCAN_STALE_AFTER_MINUTES` (default 30). "Sinal de vida" é o mais recente
+entre todos os `tier*_started_at`/`tier*_completed_at` e o `created_at` — cada
+transição de tier grava um desses timestamps, então o máximo deles é a última
+vez que alguém tocou no job. O `created_at` entra na conta porque existe o
+caso em que ele é o único timestamp preenchido, e é justamente o caso do
+incidente: a linha nasce com o Tier 1 em `running` e, se ninguém consome a
+fila, nada mais é escrito depois dela.
+
+Essa regra é aplicada em dois pontos complementares, e a escolha dos pontos
+foi ditada pela stack: **não há celery beat** aqui, então não existe um
+agendador para varrer o banco periodicamente, e acrescentar um container só
+para isso seria caro demais para o problema. O primeiro ponto é o **boot da
+API**: se o processo está subindo, a stack foi reiniciada, e tudo que estava
+em voo no broker anterior já se perdeu — é o momento em que a varredura tem a
+maior chance de encontrar exatamente os jobs que ela existe para encontrar. O
+segundo é **preguiçoso, na hora do disparo**: antes de recusar com `409`, o
+caso de uso verifica se o job que está bloqueando não é um job travado; se
+for, marca os tiers pendentes como `failed` e deixa o novo scan seguir. Só o
+primeiro ponto não bastaria (a API pode ficar meses no ar), e só o segundo
+tampouco (a projeção continuaria mentindo até alguém tentar escanear de novo).
+Em ambos os casos, tiers já `done`/`skipped` são preservados: só o que estava
+pendente vira `failed`, porque é só sobre isso que se pode afirmar que
+ninguém vai concluir.
+
+Vale notar o que essa recuperação **não** é: ela não reexecuta nada. Marcar
+como `failed` é uma afirmação honesta ("este scan não terminou e ninguém vai
+terminá-lo"), não uma tentativa de salvar o trabalho perdido. Redisparar
+automaticamente seria fazer o sistema tomar, sozinho, uma decisão de custo
+(scanners pesados, chamadas ao Claude) a partir de um sinal indireto. O
+caminho de volta é o disparo normal — que agora funciona, porque a linha
+deixou de bloquear.
+
+Um bug menor apareceu na mesma investigação e vale registrar, porque tem a
+mesma raiz conceitual (a linha ser chaveada por commit, não por execução). Um
+redisparo reaproveitava a linha existente **sem** resetar os timestamps da
+execução anterior: uma linha chegou a alegar um Tier 1 de 22 horas quando a
+execução real durou segundos — o `tier1_started_at` era da primeira tentativa
+e o `tier1_completed_at`, da segunda. Hoje `create_scan_job` detecta que a
+linha já existe e reinicia o estado de execução (status, timestamps,
+`blocked_at_tier`, risco final). O `created_at` é deliberadamente preservado:
+ele responde "desde quando este commit está no sistema", que é uma pergunta
+diferente de "quanto durou esta execução" — essa segunda se lê pelos
+`tier*_started_at`, que agora são sempre da execução corrente.
+
+---
+
+## 8. O checkout do repositório: por que cada tarefa clona o seu
+
+Por um bom tempo o pipeline rodava inteiro sem nunca ter visto o código. O
+`repo_path` que atravessava o canvas era um caminho inventado
+(`/tmp/aperia/<sha>`) que não existia em lugar nenhum; Semgrep, TruffleHog e
+Trivy tentavam ler aquele diretório, falhavam com `No such file or directory`
+e — pela filosofia best-effort da §5 — devolviam lista vazia. O efeito em
+cascata era pior do que "faltam alguns findings": Tier 1 entregava zero,
+Gate 1 não tinha secret para bloquear, Tier 2 correlacionava nada, o risco
+final fechava em `info` e o Gate 2 nunca escalava para o Tier 3. O pipeline
+terminava verde, com um relatório dizendo que estava tudo bem. Num produto de
+segurança, esse é o pior desfecho possível: não é uma falha visível, é uma
+afirmação falsa.
+
+O checkout real resolve isso, mas a pergunta interessante não é "como clonar"
+— é **onde** o clone deveria viver.
+
+### Um clone por tarefa, não um volume compartilhado
+
+`repo_path` é lido em dois tiers: o Tier 1 (Semgrep changed + TruffleHog) e o
+Tier 2 (Trivy). Eles rodam em **containers diferentes** — cada serviço de
+worker em `docker-compose.base.yml` monta apenas o `.env`, não há filesystem
+comum. Um clone feito no worker do Tier 1 simplesmente não existe no do
+Tier 2.
+
+A saída óbvia seria um volume compartilhado entre os workers. Ela resolve o
+acesso e cria um problema pior: **quem apaga, e quando**. O pipeline é
+assíncrono, tem gates que o interrompem no meio (Gate 1 bloqueia, Gate 2 não
+escala) e tasks que podem ser reexecutadas (`acks_late=True`). Nenhum ponto do
+canvas sabe, com segurança, que ninguém mais vai precisar daquela árvore — e
+uma limpeza errada em qualquer direção custa caro: apagar cedo quebra um tier
+que ainda ia rodar, apagar tarde (ou nunca) enche o disco do host com uma
+cópia do código de cada commit já escaneado.
+
+Com **checkout por tarefa** a pergunta desaparece: quem clonou apaga, no
+`finally` do próprio context manager
+(`app/infrastructure/git/repo_checkout.py`), inclusive quando a task morre por
+exceção. O preço é materializar o mesmo commit mais de uma vez por pipeline.
+Como cada checkout é um fetch **raso do commit exato** (`--depth 1`), o custo
+é da ordem do tamanho da árvore, não do histórico — barato perto de manter
+estado compartilhado e vivo entre containers.
+
+Um detalhe do "como": não dá para usar `git clone --depth 1`, porque clone
+raso só alcança a ponta de um branch e o pipeline escaneia um **commit
+específico** (o HEAD do PR, que pode já não ser a ponta de nada quando o
+worker roda). Por isso a sequência é `git init` → `remote add` →
+`fetch --depth 1 origin <sha>` → `checkout FETCH_HEAD`, que busca exatamente
+aquele objeto.
+
+### O token nunca toca o disco nem a linha de comando
+
+O clone é autenticado com o installation token do GitHub App — um segredo de
+vida curta, mas segredo. As duas formas usuais de passá-lo ao git são ruins,
+cada uma à sua maneira. Embutir na URL do remote
+(`https://x-access-token:<token>@github.com/...`) grava a credencial em texto
+puro no `.git/config` **dentro do diretório clonado**, onde qualquer scanner
+que varre a árvore inteira pode encontrá-la (o TruffleHog, ironicamente, é
+excelente nisso). Passar por `git -c http.extraHeader=...` deixa o token em
+argv, legível por qualquer processo da máquina em `/proc/<pid>/cmdline`.
+
+A opção adotada é a menos ruim das disponíveis: variáveis de ambiente
+(`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`), que o git
+aplica como se fossem `-c`, sem persistir nada no diretório e sem aparecer em
+argv — `/proc/<pid>/environ` só é legível pelo dono do processo. Não existe
+alternativa perfeita: autenticar exige que o segredo esteja em **algum** canal
+do processo filho; a escolha é sobre qual canal tem a menor superfície.
+
+Isso ainda deixa um vazamento clássico em aberto: o git ecoa a URL nas
+mensagens de erro, e essas mensagens vão parar em log e em exceção. Por isso
+tudo que sai do módulo passa por uma função de redação que troca o token (e a
+sua forma base64, que é como ele viaja no header) por `***`. Há teste
+provando as duas coisas — que o segredo não aparece em argv e que não aparece
+nem no log nem na mensagem de erro.
+
+### Falhar no checkout é falhar o scan
+
+O checkout é a única peça do pipeline que **não** é best-effort, e é uma
+exceção consciente à regra da §5. A filosofia "scanner falho → `[]`" existe
+porque um scanner ausente ainda deixa os outros trabalharem. Sem a árvore em
+disco não há trabalho nenhum: os três scanners locais leem arquivos. Fingir
+sucesso reproduziria exatamente o desfecho que o checkout veio consertar —
+zero findings, pipeline verde, afirmação falsa.
+
+Então a task falha. E como uma task que falha interrompe o canvas, ninguém
+mais marcaria o `ScanJob`: ele ficaria `running` até a varredura de jobs
+travados descrita na §7, bloqueando novos disparos daquele commit com `409`
+durante todo o intervalo. Para não deixar esse rastro, o guard
+(`app/presentation/workers/checkout_guard.py`) encerra os tiers pendentes
+antes de propagar a exceção, usando a **mesma** operação idempotente da
+recuperação (`fail_pending_tiers`) — as duas rotas convergem em vez de
+competir: se o guard rodar primeiro, o job deixa de estar em andamento e a
+varredura nem o enxerga.
+
+### `changed_files`: onde o escopo do Semgrep é decidido
+
+O canvas nunca carregou diff. `changed_files` saía de `dispatch_pipeline`
+vazio, e o Semgrep do Tier 1 tratava lista vazia como "nada a escanear" —
+outro caminho silencioso para zero findings.
+
+A correção separa duas perguntas que estavam misturadas. **Quem sabe o diff**
+é quem tem os arquivos: com o checkout real, `git diff --name-only base head`
+roda dentro do próprio clone. Isso funciona mesmo em fetch raso porque `diff`
+compara *árvores*, não precisa da ancestralidade entre os dois commits — basta
+que os dois objetos existam, e o checkout busca o `base_sha` num segundo fetch
+raso justamente para isso. **Quem decide o escopo** é o worker: se há diff
+(scan de PR, `base_sha != commit_sha`), o Semgrep roda só nos arquivos
+tocados; se não há base contra o que comparar (scan manual de branch, onde
+`base_sha == commit_sha`), o alvo passa a ser a árvore inteira.
+
+O fallback é deliberadamente assimétrico: quando o diff **não pôde** ser
+calculado (force-push apagou o commit base, por exemplo), o comportamento é o
+mesmo do scan manual — varre tudo. Errar para o lado de escanear demais custa
+tempo; errar para o lado de escanear nada custa a razão de existir do produto.
+O mesmo diff, no Tier 2, é o que devolve utilidade ao Prowler: ele só roda
+quando o PR toca arquivos IaC (`has_iac_files`), e com `changed_files` sempre
+vazio essa condição nunca era verdadeira.
+
+Continua fora do escopo o `target_url`: sem uma URL de aplicação rodando, o
+ZAP (DAST) segue sendo pulado no Tier 3. Essa nota permanece honesta — é a
+única peça do canvas ainda alimentada por um valor ausente.
+
+## 9. Como o Tier 1 procura secrets: o modo depende do checkout
+
+O checkout do pipeline é **raso** (`--depth 1`): a árvore materializada tem
+**um único commit**. Isso não é detalhe de implementação — decide o que o
+TruffleHog consegue examinar.
+
+O modo `git` do TruffleHog percorre **histórico**. Sobre um checkout raso ele
+tem, no melhor caso, um commit para olhar. E no scan manual de branch, onde
+`base_sha == head_sha`, o intervalo `--since-commit` fica **vazio**: zero
+commits examinados. O pipeline concluía com `0 findings` sem ter procurado —
+que é o pior resultado possível, porque é indistinguível de "repositório
+limpo".
+
+Por isso o modo passou a ser escolhido pelo que existe para examinar:
+
+| Gatilho | `base_sha` | Modo | O que varre |
+|---|---|---|---|
+| Pull request | distinto do head | `git` | os commits do PR (`--since-commit`) |
+| Branch (scan manual) | ausente ou igual ao head | `filesystem` | a árvore de trabalho do commit |
+
+### Secret não verificado agora aparece
+
+O filtro de verificação existia **em dobro**: `--only-verified` na linha de
+comando e um segundo `if item["Verified"]` no parsing. Um segredo que o
+TruffleHog detectasse mas não conseguisse validar contra o provedor sumia sem
+deixar rastro — o que esconde credencial revogada, de ambiente de teste, ou de
+provedor para o qual não existe verificador.
+
+A verificação virou **severidade**, não censura:
+
+- **verificado** → `critical`, com `secret_verified=true`;
+- **não verificado** → `medium`.
+
+`medium` é deliberado. O Gate 1 bloqueia o PR apenas com `secret_verified=true`
+e o Gate 2 escala para o Tier 3 apenas com `high`/`critical` — então o achado
+fica visível no dashboard sem travar merge por suspeita nem inflar a análise
+profunda. Quem decide o que fazer com ele é quem lê, não o scanner.
+
+### O log diz o modo
+
+`tier1_trufflehog_complete` passou a registrar `modo` e `verificados`. Sem isso,
+`findings_count=0` é ambíguo entre "não achei" e "não procurei" — e foi
+exatamente essa ambiguidade que escondeu o problema até um teste controlado
+comparar as cinco variantes de invocação contra um checkout real.
+
+## 10. Perder finding é falha, não aviso
+
+A §5 explica por que "nunca derrubar o pipeline" é a regra central: um scanner
+ausente não pode impedir os outros de trabalhar. Essa regra tem **duas
+exceções**, e as duas seguem o mesmo critério.
+
+| Falha | Best-effort? | Por quê |
+|---|---|---|
+| Scanner quebrou | sim → `[]` | os outros scanners ainda produzem resultado |
+| Checkout falhou | **não** → task falha | sem árvore não há o que escanear |
+| Gravação falhou | **não** → task falha | o produto perde o que foi encontrado |
+
+O critério não é "quão grave é o erro", é **se ainda existe trabalho útil a
+fazer depois dele**. Scanner que falha deixa os outros trabalharem. Checkout e
+persistência que falham deixam o pipeline concluir dizendo "nada encontrado" —
+que num produto de segurança é o pior desfecho possível, porque é
+indistinguível do resultado legítimo.
+
+A persistência era best-effort e o custo apareceu na prática: um `cwe_id` de 93
+caracteres numa coluna de 50 derrubou o `INSERT`, o erro virou warning, e o
+pipeline concluiu anunciando sucesso sobre um repositório onde o Semgrep tinha
+acabado de achar um XSS. O finding existia no payload do canvas e alimentou o
+Tier 2 — mas o dashboard lê `GET /findings`, não o canvas. Para quem usava o
+produto, o repositório estava limpo.
+
+O argumento antigo ("o gate e a análise operam sobre os dicts, não sobre o
+banco") continua verdadeiro, mas descreve o **pipeline**, não o **produto**.
+
+`persist_findings` levanta `FindingPersistenceError`; o
+`persistence_guard.persistir_ou_falhar` encerra os tiers pendentes do `ScanJob`
+antes de propagar — mesmo cuidado do `checkout_guard`, porque uma task que
+falha interrompe o canvas e ninguém mais marcaria o job, que ficaria `running`
+até a varredura de 30 minutos bloqueando novos disparos daquele commit.
+
+Dois casos seguem devolvendo `0` sem erro, porque em nenhum deles há perda:
+persistência desligada por configuração (`FINDINGS_PERSISTENCE_ENABLED`) e
+lista de findings vazia.
+
+## 11. Quando a guarda de injection briga com o produto
+
+O `LLMGuardClient` bloqueia prompts com padrões de prompt injection, e um deles
+é `BEGIN ... PRIVATE KEY`. A razão original é boa: scanner lê código, e um
+atacante pode plantar payload num comentário para manipular o LLM que vai ler
+aquele finding.
+
+Só que esse padrão específico é **exatamente aquilo que um scanner de secrets
+deve encontrar**. Com um repositório que tem chave privada de verdade (o
+OWASP Juice Shop tem), a cadeia era:
+
+```
+TruffleHog acha a chave  →  `Raw` vai para `description` do finding
+  →  prompt do relatório do Tier 2 inclui os findings completos
+  →  guarda casa "BEGIN RSA PRIVATE KEY"  →  GuardBlockedError
+  →  Tier 2 em modo degradado, sem IA
+```
+
+O incentivo ficava invertido: **quanto melhor o scanner trabalhava, menos
+análise por IA o usuário recebia.** A guarda não distingue "atacante plantou
+isto" de "nosso scanner achou um segredo real e está reportando" — e num
+produto de segurança a segunda hipótese é a esperada.
+
+### Redigir, não bloquear
+
+`redigir_segredos()` troca o material sensível por um marcador **antes** da
+guarda. Resolve os dois lados:
+
+- o segredo **não sai da infraestrutura** — mandar chave privada real para um
+  LLM de terceiros é indesejável por si só, independente da guarda;
+- o texto que sobra não dispara o padrão, então a análise volta a rodar.
+
+O modelo não precisa do segredo para raciocinar sobre ele: precisa saber que
+existe, de que tipo e onde. O valor original continua no banco e em
+`raw_output` — quem precisa dele é o usuário, não o modelo.
+
+### Por que no cliente, e não no builder de prompt
+
+A redação fica em `ClaudeClient.call`, ponto por onde **toda** chamada passa.
+O incidente mostrou por quê: o bloqueio não vinha do `chain_of_events` (que nem
+inclui `description`) e sim do relatório do Tier 2, que recebe os findings
+completos. Corrigir no builder consertaria um caminho e deixaria os outros —
+e cada prompt novo seria uma chance de reintroduzir o vazamento.
+
+`prompt_segredos_redigidos` registra quantos segredos foram redigidos por
+chamada. As outras 13 regras de injection continuam rodando sobre o texto
+redigido: redigir não afrouxa a guarda, remove o falso positivo.
+
+## 12. O Gate 2 escala por dois critérios, não um
+
+O Gate 2 escalava só quando **algum finding individual** era `high`/`critical`.
+Essa regra ignora volume e correlação — que é precisamente o que o Tier 2
+acabou de calcular e entregar no `risk_score`.
+
+O caso que expôs a lacuna: 57 possíveis secrets num repositório, todos
+`medium` individualmente (não verificados não travam merge por suspeita),
+somando risco agregado **`high` 74/100**. Nenhum item sozinho cruzava a barra,
+então o pipeline descartava a análise profunda exatamente no cenário em que ela
+é mais útil — muita coisa média que, junta, forma cadeia de ataque.
+
+Agora escala se **qualquer** um valer:
+
+| # | Critério | O que indica |
+|---|---|---|
+| 1 | `high`/`critical` em algum finding | um problema grave isolado |
+| 2 | `high`/`critical` no `risk_score.level` do Tier 2 | o conjunto é grave |
+
+`risk_score_adjusted` (Tier 3) tem precedência sobre `risk_score` (Tier 2) — a
+mesma ordem que `scan_job_writer` usa para gravar `final_risk_level`. As duas
+leituras precisam concordar, senão o dashboard mostraria um nível e o gate teria
+decidido por outro.
+
+O log registra **qual** critério disparou (`criterio=severidade_individual` /
+`risco_agregado` / `severidade_e_risco`), porque a investigação que se segue é
+diferente: severidade aponta para um finding específico, risco agregado aponta
+para o conjunto.

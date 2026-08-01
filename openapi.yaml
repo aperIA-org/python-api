@@ -836,7 +836,20 @@ paths:
 
         — em particular o `id` da linha existente, não o uuid gerado em memória
 
-        (que não existiria no banco e faria `PATCH`/`DELETE` retornarem 404).'
+        (que não existiria no banco e faria `PATCH`/`DELETE` retornarem 404).
+
+
+        `target_url` (opcional) é a URL onde a aplicação está publicada e vira o
+
+        alvo do DAST no Tier 3. Ela passa pela validação anti-SSRF descrita em
+
+        `PATCH /repositories/{id}` — URL malformada ou apontando para rede interna
+
+        responde `422`. Por ser upsert, **omitir o campo preserva** a URL já
+
+        gravada (senão um POST de reativação apagaria o alvo sem ninguém pedir);
+
+        limpar é operação explícita do `PATCH` com `null`.'
       operationId: create_repository_repositories_post
       requestBody:
         content:
@@ -908,8 +921,33 @@ paths:
     patch:
       tags:
       - repositories
-      summary: Ativar/desativar repositório
-      description: Ativa ou desativa um repositório. 404 se não pertencer ao usuário.
+      summary: Atualizar repositório (ativação e/ou alvo de DAST)
+      description: "Atualização **parcial**: aplica só os campos presentes no corpo.\n\n`404` se o repositório\
+        \ não existir ou não pertencer ao usuário (nunca 403).\n\nSemântica do corpo — `active` e `target_url`\
+        \ são independentes:\n\n- campo ausente → não é tocado;\n- `{\"active\": false}` → desativa (contrato\
+        \ inalterado, é o que o\n  front-end já envia);\n- `{\"target_url\": \"https://staging.acme.com\"\
+        }` → define o alvo do DAST;\n- `{\"target_url\": null}` → **limpa** o alvo (o Tier 3 volta a pular\
+        \ o ZAP).\n\n`null` em `target_url` é valor legítimo, não omissão — por isso a rota\ndecide por\
+        \ presença da chave (`model_fields_set`), não por \"veio `None`\".\nCorpo vazio e `{\"active\"\
+        : null}` são `422` explícitos, para que um erro de\ncliente não passe como no-op silencioso.\n\
+        \n## Por que `target_url` é validada com uma blocklist de rede\n\nO `target_url` não é um link\
+        \ exibido na UI: ele é entregue ao OWASP ZAP,\nque faz spider e **active scan** — dispara payloads\
+        \ reais de SQLi, XSS e\npath traversal contra tudo que encontrar. Aceitar URL arbitrária tem duas\n\
+        consequências diretas:\n\n1. **Ataque não autorizado a terceiros.** Cadastrar o site de outra\n\
+        \   empresa transformaria o aperIA na origem de um ataque, com o IP da\n   nossa infraestrutura\
+        \ no log da vítima.\n2. **SSRF privilegiado.** O worker de Tier 3 roda dentro da nossa rede e\n\
+        \   alcança o que o usuário não alcança. `http://127.0.0.1:8090` é o\n   próprio ZAP; `http://10.0.0.5`\
+        \ é banco/Redis; e\n   `http://169.254.169.254` é o endpoint de metadata de AWS/GCP/Azure, que\n\
+        \   devolve **credenciais IAM temporárias da instância** — que voltariam ao\n   usuário dentro\
+        \ dos findings do relatório.\n\nPor isso só passa URL http/https absoluta, sem credenciais embutidas,\
+        \ com\nhost público: são recusados `localhost`, `127.0.0.0/8`, RFC1918\n(`10/8`, `172.16/12`,\
+        \ `192.168/16`), link-local `169.254.0.0/16` (o\nmetadata incluso), CGNAT `100.64.0.0/10`, ULA/loopback\
+        \ IPv6, IPv4 mapeado\nem IPv6, as formas decimal/hexadecimal de IP (`http://2130706433`),\nsufixos\
+        \ internos (`.local`, `.internal`, `.localhost`) e hosts de rótulo\núnico (`http://zap`), que\
+        \ só existem dentro da rede do worker.\n\nO que a validação **não** cobre, deliberadamente: um\
+        \ domínio público cujo\nDNS aponta para dentro (rebinding). Resolver DNS no cadastro seria TOCTOU\n\
+        — o registro muda entre validar e escanear — então a defesa desse vetor é\nde rede (egress policy\
+        \ no container do ZAP), não de schema."
       operationId: update_repository_repositories__repository_id__patch
       security:
       - HTTPBearer: []
@@ -943,11 +981,31 @@ paths:
         '404':
           description: Repositorio nao encontrado.
         '422':
-          description: Validation Error
+          description: 'Payload invalido (nenhum campo, `active: null` ou `target_url` recusada).'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+              examples:
+                alvo_bloqueado:
+                  summary: URL aponta para a rede interna
+                  value:
+                    detail:
+                    - type: target_url_alvo_bloqueado
+                      loc:
+                      - body
+                      - target_url
+                      msg: 'Alvo bloqueado: 169.254.169.254 aponta para a rede interna. Informe a URL
+                        publica do ambiente de staging/preview.'
+                esquema_invalido:
+                  summary: Esquema fora de http/https
+                  value:
+                    detail:
+                    - type: target_url_esquema_invalido
+                      loc:
+                      - body
+                      - target_url
+                      msg: 'Esquema ''file'' nao e aceito: use http:// ou https://.'
     delete:
       tags:
       - repositories
@@ -1752,6 +1810,17 @@ components:
           type: string
           title: Default Branch
           default: main
+        target_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Url
+          description: URL onde a aplicacao deste repositorio esta publicada (staging/preview). E o alvo
+            do DAST (OWASP ZAP) no Tier 3; ausente/`null` significa 'sem deploy conhecido' e o ZAP e pulado.
+            Apenas http/https absoluta e apontando para host publico. Como o POST e upsert, omitir o campo
+            **preserva** a URL ja gravada; para remover use `PATCH` com `null`.
+          examples:
+          - https://staging.suaempresa.com
       type: object
       required:
       - github_account_id
@@ -1790,6 +1859,16 @@ components:
         active:
           type: boolean
           title: Active
+        target_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Url
+          description: URL onde a aplicacao deste repositorio esta publicada (staging/preview). E o alvo
+            do DAST (OWASP ZAP) no Tier 3; ausente/`null` significa 'sem deploy conhecido' e o ZAP e pulado.
+            Apenas http/https absoluta e apontando para host publico.
+          examples:
+          - https://staging.suaempresa.com
         created_at:
           type: string
           format: date-time
@@ -1804,19 +1883,66 @@ components:
       - url
       - default_branch
       - active
+      - target_url
       - created_at
       title: RepositoryResponse
       description: Repositório GitHub conectado ao aperIA, pertencente a um usuário.
     RepositoryUpdate:
       properties:
         active:
-          type: boolean
+          anyOf:
+          - type: boolean
+          - type: 'null'
           title: Active
+          description: Ativa/desativa o monitoramento. Omitir = nao alterar. Nao aceita null.
+        target_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Url
+          description: URL onde a aplicacao deste repositorio esta publicada (staging/preview). E o alvo
+            do DAST (OWASP ZAP) no Tier 3; ausente/`null` significa 'sem deploy conhecido' e o ZAP e pulado.
+            Apenas http/https absoluta e apontando para host publico. Omitir = nao alterar; enviar `null`
+            = remover o alvo.
+          examples:
+          - https://staging.suaempresa.com
       type: object
-      required:
-      - active
       title: RepositoryUpdate
-      description: Payload para ativar/desativar um repositório.
+      description: 'Payload parcial: aplica **apenas** os campos presentes no JSON.
+
+
+        Este schema exigia ``active`` obrigatório. Acrescentar ``target_url`` como
+
+        segundo obrigatório quebraria o cliente atual, que envia
+
+        ``{"active": false}``; e tornar os dois simplesmente opcionais criaria uma
+
+        ambiguidade real em ``target_url``, onde ``null`` é um valor legítimo —
+
+        "não mandei o campo" e "mandei null para limpar" chegariam idênticos
+
+        (ambos ``None``).
+
+
+        A saída é semântica explícita baseada em ``model_fields_set``, que o
+
+        Pydantic preenche com as chaves **realmente presentes** no JSON:
+
+
+        - chave ausente → campo não é tocado;
+
+        - ``"target_url": "https://…"`` → define/atualiza o alvo;
+
+        - ``"target_url": null`` → **limpa** o alvo (volta a pular o DAST);
+
+        - ``"active": true|false`` → mesma semântica de sempre.
+
+
+        Duas recusas explícitas, para que erro de cliente não vire no-op silencioso:
+
+        corpo sem nenhum dos campos, e ``"active": null`` (não existe "limpar" um
+
+        booleano ``NOT NULL``).'
     ScanJobPage:
       properties:
         items:

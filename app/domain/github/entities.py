@@ -30,4 +30,10 @@ class Repository:
     id: UUID = field(default_factory=uuid4)
     default_branch: str = "main"
     active: bool = True
+    # URL onde ESTE repositório está publicado (staging/preview). É o alvo do
+    # DAST (ZAP) no Tier 3; `None` — o caso comum — significa "sem deploy
+    # conhecido", e o Tier 3 pula o ZAP registrando `reason="no_target_url"`.
+    # Não confundir com `url`, que é o endereço do repositório no GitHub.
+    # Validada por `app.domain.github.target_url.validar_target_url`.
+    target_url: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)

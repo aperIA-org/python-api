@@ -10,6 +10,11 @@ para que falhas em um teste de AI não vazem para o próximo.
 """
 from __future__ import annotations
 
+import shutil
+import tempfile
+from contextlib import contextmanager
+from unittest.mock import patch
+
 import pytest
 
 from app.config import settings
@@ -52,6 +57,34 @@ def disable_scan_persistence():
         yield
     finally:
         settings.SCAN_PERSISTENCE_ENABLED = original
+
+
+@pytest.fixture(autouse=True)
+def fake_repo_checkout():
+    """Neutraliza o checkout real do repositório nos scan workers.
+
+    Os workers de T1/T2 clonam o commit antes de rodar os scanners. Em teste
+    não há GitHub App, token nem rede — trocamos o clone por um diretório
+    temporário vazio (criado e apagado igual ao real, para que qualquer código
+    que dependa da existência do caminho continue válido).
+
+    O patch é só na referência que o ``checkout_guard`` importou: os testes do
+    próprio checkout usam ``infrastructure.git.repo_checkout`` direto e não são
+    afetados. Testes que precisam simular falha de checkout sobrescrevem este
+    patch localmente.
+    """
+    from app.presentation.workers import checkout_guard
+
+    @contextmanager
+    def _checkout_falso(**_kwargs):
+        destino = tempfile.mkdtemp(prefix="aperia-test-checkout-")
+        try:
+            yield destino
+        finally:
+            shutil.rmtree(destino, ignore_errors=True)
+
+    with patch.object(checkout_guard, "checkout_repo", _checkout_falso):
+        yield
 
 
 @pytest.fixture(autouse=True)

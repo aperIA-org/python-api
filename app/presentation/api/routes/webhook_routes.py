@@ -86,15 +86,21 @@ _WEBHOOK_RESPONSES = {
 
 
 def _resolve_owner(installation_id: int, github_repo_id: int | None) -> tuple:
-    """Resolve (user_id, repository_id) do repositório cadastrado, best-effort.
+    """Resolve (user_id, repository_id, target_url) do repositório cadastrado.
 
-    Só consulta o banco quando a persistência de scan está ligada (em teste
-    fica desligada → não exige Postgres). Repositório não cadastrado ou
-    inativo → ``(None, None)`` (o scan roda, mas fica órfão e não aparece na
-    leitura isolada de nenhum usuário).
+    Best-effort. Só consulta o banco quando a persistência de scan está ligada
+    (em teste fica desligada → não exige Postgres). Repositório não cadastrado
+    ou inativo → ``(None, None, None)`` (o scan roda, mas fica órfão e não
+    aparece na leitura isolada de nenhum usuário).
+
+    O ``target_url`` sai daqui pelo mesmo motivo que o dono: é atributo do
+    **repositório cadastrado**, não do evento — o payload do GitHub não diz
+    onde a aplicação está publicada. Repositório desconhecido continua sem
+    alvo, e o Tier 3 pula o ZAP como antes.
     """
+    vazio = (None, None, None)
     if not settings.SCAN_PERSISTENCE_ENABLED or not github_repo_id:
-        return (None, None)
+        return vazio
     try:
         from app.infrastructure.database.sqlalchemy import SessionLocal
         from app.infrastructure.repositories.sqlalchemy_repository_repository import (
@@ -106,11 +112,11 @@ def _resolve_owner(installation_id: int, github_repo_id: int | None) -> tuple:
                 installation_id, github_repo_id
             )
         if repo is None or not repo.active:
-            return (None, None)
-        return (repo.user_id, repo.id)
+            return vazio
+        return (repo.user_id, repo.id, repo.target_url)
     except Exception as exc:  # noqa: BLE001 — best-effort: nunca quebra o webhook
         logger.warning("webhook_owner_resolve_failed", installation_id=installation_id, error=str(exc))
-        return (None, None)
+        return vazio
 
 
 def _verify_hmac(payload: bytes, signature_header: str) -> bool:
@@ -168,8 +174,11 @@ async def github_webhook(request: Request) -> dict:
         github_repo_id = payload["repository"].get("id")
         base_sha = payload["pull_request"].get("base", {}).get("sha", commit_sha)
 
-        # Atribui o scan ao dono (repo cadastrado + ativo). Órfão se não achar.
-        user_id, repository_id = _resolve_owner(installation_id, github_repo_id)
+        # Atribui o scan ao dono (repo cadastrado + ativo) e recupera o alvo de
+        # DAST cadastrado nele. Órfão e sem alvo se não achar.
+        user_id, repository_id, target_url = _resolve_owner(
+            installation_id, github_repo_id
+        )
 
         logger.info(
             "webhook_pr_received",
@@ -177,10 +186,11 @@ async def github_webhook(request: Request) -> dict:
             pr_number=pr_number,
             repo=repo_full_name,
             owned=bool(user_id),
+            dast=bool(target_url),
         )
 
         # Mesmo ponto de disparo do scan manual (`POST /repositories/{id}/scan`)
-        # — os argumentos "de MVP" do canvas vivem lá, não aqui.
+        # — os argumentos do canvas vivem lá, não aqui.
         dispatch_pipeline(
             commit_sha=commit_sha,
             repo_url=repo_url,
@@ -190,6 +200,7 @@ async def github_webhook(request: Request) -> dict:
             base_sha=base_sha,
             user_id=user_id,
             repository_id=repository_id,
+            target_url=target_url,
         )
         return {"status": "queued", "commit_sha": commit_sha}
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.github.entities import GithubAccount
@@ -50,14 +50,31 @@ class SQLAlchemyGithubAccountRepository(GithubAccountRepository):
             self.db.execute(stmt)
             return
 
-        # Fallback: insere e engole IntegrityError (defense-in-depth).
+        # Fallback (dialeto sem ON CONFLICT): insere dentro de um SAVEPOINT e,
+        # em caso de conflito, atualiza a linha existente — mesma semântica de
+        # upsert dos dialetos acima.
+        #
+        # O `self.db.rollback()` que estava aqui derrubava a transação INTEIRA
+        # do caller, não só o insert que falhou: o callback do GitHub faz mais
+        # escritas depois deste `save`, e todas se perdiam em silêncio. É o
+        # mesmo defeito já corrigido em `sqlalchemy_repository_repository.py`;
+        # `begin_nested()` desfaz apenas o SAVEPOINT.
         from sqlalchemy.exc import IntegrityError
 
         try:
-            self.db.add(GithubAccountModel.from_entity(account))
-            self.db.flush()
+            with self.db.begin_nested():
+                self.db.add(GithubAccountModel.from_entity(account))
+                self.db.flush()
         except IntegrityError:
-            self.db.rollback()
+            existente = self.get_by_installation(account.installation_id)
+            if existente is None:
+                raise
+            self.db.execute(
+                update(GithubAccountModel)
+                .where(GithubAccountModel.installation_id == account.installation_id)
+                .values({col: row[col] for col in _UPDATE_COLUMNS})
+            )
+            self.db.flush()
 
     def get_by_id(self, account_id: UUID) -> GithubAccount | None:
         result = self.db.execute(

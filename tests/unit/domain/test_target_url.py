@@ -146,3 +146,65 @@ class TestAlvosInternosBloqueados:
         with pytest.raises(TargetUrlInvalidaError) as exc:
             validar_target_url("http://banco.internal./")
         assert exc.value.codigo == "target_url_alvo_bloqueado"
+
+
+class TestAlvoInternoLiberadoEmDesenvolvimento:
+    """A flag libera SÓ as recusas de rede interna, nada além disso.
+
+    Existe por uma lacuna real: sem ela não há caminho suportado para testar
+    DAST em desenvolvimento — um Juice Shop local é `http://juice-shop:3000`,
+    exatamente o que a proteção recusa.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://juice-shop:3000",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://192.168.0.10:8080",
+            "http://10.0.0.5",
+            "http://app.internal",
+        ],
+    )
+    def test_libera_alvo_interno_quando_permitido(self, url):
+        assert validar_target_url(url, permitir_alvo_interno=True) == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://juice-shop:3000",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+    )
+    def test_continua_recusando_por_default(self, url):
+        """O default é seguro: sem a flag, nada muda."""
+        with pytest.raises(TargetUrlInvalidaError):
+            validar_target_url(url)
+
+    @pytest.mark.parametrize(
+        "url,codigo",
+        [
+            ("file:///etc/passwd", "target_url_esquema_invalido"),
+            ("http://user:pass@juice-shop:3000", "target_url_com_credenciais"),
+            ("nao-e-url", "target_url_malformada"),
+            ("   ", "target_url_vazia"),
+        ],
+    )
+    def test_flag_nao_afrouxa_as_outras_regras(self, url, codigo):
+        """A flag não é um "aceite qualquer coisa"."""
+        with pytest.raises(TargetUrlInvalidaError) as exc:
+            validar_target_url(url, permitir_alvo_interno=True)
+        assert exc.value.codigo == codigo
+
+    def test_metadata_de_cloud_tambem_e_liberada_o_que_e_o_risco_da_flag(self):
+        """Registro explícito do custo: 169.254.169.254 passa com a flag ligada.
+
+        É por isso que o default é falso e a documentação diz "nunca em
+        produção" — ligada, a flag reabre o caminho para credenciais de IAM.
+        """
+        url = "http://169.254.169.254/latest/meta-data/"
+        assert validar_target_url(url, permitir_alvo_interno=True) == url
+        with pytest.raises(TargetUrlInvalidaError):
+            validar_target_url(url)

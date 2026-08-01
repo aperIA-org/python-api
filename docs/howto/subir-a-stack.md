@@ -88,12 +88,80 @@ mudar código Python):
 docker compose -f docker-compose.base.yml up -d --build
 ```
 
-## 3. Subir camadas opcionais (se precisar)
+## 3. Subir camadas opcionais (perfis)
 
-Para exercitar o Tier 3 (ZAP, OpenCTI, Caldera):
+As ferramentas pesadas do Tier 3 estão atrás de **perfis** do Compose e **não
+sobem por padrão**. A regra de ouro é: o **conjunto de arquivos nunca muda** —
+o que varia é o perfil.
+
+Rodando de dentro de `python-api/`:
 
 ```bash
-docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml up -d
+docker compose -f docker-compose.base.yml \
+               -f docker-compose.scanners.yml \
+               -f docker-compose.targets.yml \
+               up -d
+```
+
+Isso sobe **apenas a base** (api, db, redis e os 5 workers) — o suficiente para
+front, auth, telas e o pipeline de Tier 1/2. Para incluir as ferramentas
+pesadas, acrescente o perfil **antes** de `up -d`:
+
+| O que você quer | Acrescente | Sobe também |
+|---|---|---|
+| Tier 3 com DAST | `--profile dast` | ZAP e Juice Shop |
+| Emulação MITRE ATT&CK | `--profile emulation` | Caldera e o agente sandcat |
+| CTI | `--profile cti` | OpenCTI — hoje **não sobe**, ver [pendências §3](../pendencias.md) |
+
+Perfis se combinam. O comando completo para DAST + emulação:
+
+```bash
+docker compose -f docker-compose.base.yml \
+               -f docker-compose.scanners.yml \
+               -f docker-compose.targets.yml \
+               --profile dast --profile emulation up -d
+```
+
+> Essa é a configuração de **maior consumo** da stack. Se a máquina for
+> apertada, valide um perfil de cada vez: `dast` prova `zap_findings > 0`,
+> `emulation` prova `caldera_validated = true`, e são independentes.
+
+<details>
+<summary>Atalho opcional (você precisa criar)</summary>
+
+Os exemplos acima são autocontidos de propósito. Se preferir encurtar, defina o
+alias no seu shell — lembrando que os caminhos são relativos, então ele só
+funciona dentro de `python-api/`:
+
+```bash
+alias dc='docker compose -f docker-compose.base.yml \
+                         -f docker-compose.scanners.yml \
+                         -f docker-compose.targets.yml'
+```
+
+Aí `dc --profile dast up -d` equivale ao comando completo. Para valer em toda
+sessão, a mesma linha no `~/.zshrc`.
+
+</details>
+
+### Por que perfis, e por que sempre o mesmo conjunto de arquivos
+
+**Carga.** Subir tudo de uma vez (Postgres, Redis, API, 5 workers, ZAP, Caldera,
+OpenCTI, Juice Shop) esgota os recursos do WSL2 — a ponto de derrubar o DNS
+embutido do Docker no meio de uma varredura. Os containers pesados têm
+`mem_limit` justamente para que um scan falhe antes da máquina travar.
+
+**Rede.** Invocar `docker compose` com **conjuntos diferentes de arquivos**
+recria a rede `aperia_net` e deixa containers presos numa instância antiga de
+mesmo nome. O sintoma é cruel: o worker perde resolução de `zap`/`caldera` e
+nada no compose parece errado. Se acontecer:
+
+```bash
+docker compose -f docker-compose.base.yml \
+               -f docker-compose.scanners.yml \
+               -f docker-compose.targets.yml \
+               --profile dast --profile emulation \
+               up -d --force-recreate zap caldera juice-shop
 ```
 
 > ⚠️ **Gotcha do Caldera:** o `docker-compose.scanners.yml` declara a rede

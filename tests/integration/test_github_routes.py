@@ -212,3 +212,28 @@ def test_delete_account_isolation(client, user_id, auth_headers, monkeypatch):
     # dono deleta → 204
     assert client.delete(f"/github/accounts/{account_id}", headers=auth_headers).status_code == 204
     assert client.get("/github/accounts", headers=auth_headers).json() == []
+
+
+def test_save_conta_nao_derruba_transacao_do_caller(sqlite_session_factory=None):
+    """Regressão: o fallback fazia `rollback()` da transação INTEIRA.
+
+    O callback do GitHub escreve mais coisas depois do `save` da conta. Com o
+    rollback global, um conflito de `installation_id` descartava em silêncio
+    tudo que já tinha sido escrito na mesma transação. O SAVEPOINT desfaz só o
+    insert que falhou — mesmo padrão já usado no repositório de `Repository`.
+    """
+    import inspect
+
+    from app.infrastructure.repositories import (
+        sqlalchemy_github_account_repository as mod,
+    )
+
+    fonte = inspect.getsource(mod.SQLAlchemyGithubAccountRepository.save)
+    # Só linhas de código: o comentário que explica o defeito cita a chamada.
+    codigo = "\n".join(
+        linha for linha in fonte.splitlines() if not linha.strip().startswith("#")
+    )
+    assert "begin_nested" in codigo, "fallback precisa usar SAVEPOINT"
+    assert "self.db.rollback()" not in codigo, (
+        "rollback global derruba a transação do caller"
+    )

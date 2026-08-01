@@ -83,14 +83,20 @@ class CalderaClient:
             },
         )
         resp.raise_for_status()
-        return resp.json()["id"]
+        # A API v2 devolve `adversary_id`, NÃO `id` — ler `id` aqui levantava
+        # `KeyError: 'id'` logo após um POST bem-sucedido (200), e o
+        # `run_safe` traduzia para "Caldera unavailable". O erro parecia de
+        # conectividade quando a chamada tinha funcionado.
+        return resp.json()["adversary_id"]
 
     def run_operation(self, adversary_id: str) -> str:
         resp = self.client.post(
             "/api/v2/operations",
             json={
                 "name": f"aperia-op-{adversary_id[:8]}",
-                "adversary": {"id": adversary_id},
+                # Mesma assimetria: o adversário é referenciado por
+                # `adversary_id`; a operação é que devolve `id`.
+                "adversary": {"adversary_id": adversary_id},
                 "planner": {"id": "atomic"},
                 "group": settings.CALDERA_AGENT_GROUP,
             },
@@ -163,12 +169,81 @@ class CalderaClient:
     # -------------------------------------------------------- internals
 
     def _map_to_abilities(self, techniques: list[str]) -> list[str]:
-        # DEBT: mapear TTPs MITRE para ability IDs do Caldera pós-MVP.
-        # Impacto atual: caldera_validated sempre False → risk score
-        # não reflete emulação real.
-        # Implementação: GET /api/v2/abilities?technique_id={ttp} para
-        # cada técnica.
-        return []
+        """Traduz TTPs MITRE (``T1059``) em ability IDs do Caldera.
+
+        Era um stub que devolvia ``[]``, e o efeito passava despercebido: o
+        adversário nascia **sem nenhuma ability**, a operação terminava com
+        cadeia vazia e ``caldera_validated`` era sempre ``False``. Parecia
+        "emulação não encontrou nada" quando nada foi executado — a mesma
+        confusão entre "não achei" e "não procurei" que já apareceu no Tier 1.
+
+        **Uma requisição, filtro local.** A API v2 não filtra por técnica:
+        ``GET /api/v2/abilities?technique_id=T1082`` responde **422**. O
+        catálogo inteiro são ~162 abilities, então buscar tudo uma vez e casar
+        aqui é mais simples e mais barato que N requisições.
+
+        **Sub-técnicas contam.** O catálogo usa ``T1497.003``; pedir ``T1497``
+        casa com todas as filhas. Pedir a filha exata casa só com ela.
+
+        Só entram abilities com executor **linux**: o agente do sandbox roda
+        Linux, e ability de Windows na cadeia vira link que falha, derrubando o
+        ``success_rate`` por motivo que não é do alvo.
+        """
+        if not techniques:
+            return []
+
+        pedidas = {
+            str(t or "").strip().upper() for t in techniques if str(t or "").strip()
+        }
+        if not pedidas:
+            return []
+
+        try:
+            resp = self.client.get("/api/v2/abilities")
+            resp.raise_for_status()
+            catalogo = resp.json() or []
+        except Exception as exc:  # noqa: BLE001 — best-effort, como o resto
+            logger.warning("caldera_ability_lookup_failed", error=str(exc))
+            return []
+
+        abilities: list[str] = []
+        for ability in catalogo:
+            if not isinstance(ability, dict):
+                continue
+            tid = str(ability.get("technique_id") or "").upper()
+            if not tid or not self._casa_tecnica(tid, pedidas):
+                continue
+            if not self._tem_executor_linux(ability):
+                continue
+            ability_id = ability.get("ability_id") or ability.get("id")
+            if ability_id and ability_id not in abilities:
+                abilities.append(ability_id)
+
+        logger.info(
+            "caldera_abilities_mapeadas",
+            tecnicas=len(pedidas),
+            abilities=len(abilities),
+            catalogo=len(catalogo),
+        )
+        return abilities
+
+    @staticmethod
+    def _casa_tecnica(technique_id: str, pedidas: set[str]) -> bool:
+        """`T1497.003` casa com `T1497.003` e também com o pai `T1497`."""
+        if technique_id in pedidas:
+            return True
+        pai = technique_id.split(".", 1)[0]
+        return pai in pedidas
+
+    @staticmethod
+    def _tem_executor_linux(ability: dict[str, Any]) -> bool:
+        """`True` se a ability tem executor para Linux (plataforma do agente)."""
+        for executor in ability.get("executors", []) or []:
+            if not isinstance(executor, dict):
+                continue
+            if str(executor.get("platform", "")).lower() == "linux":
+                return True
+        return False
 
     def _parse_results(self, op: dict[str, Any]) -> dict[str, Any]:
         links = op.get("chain", []) or []

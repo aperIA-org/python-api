@@ -10,8 +10,32 @@
 #   ▸ ``CALDERA_SANDBOX_MODE: "true"`` é validado no cliente Python;
 #     remover essa env → ``SandboxViolationError`` no boot.
 #
-# Sobe junto com docker-compose.base.yml:
-#   docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml up -d
+# COMO SUBIR — sempre com o MESMO conjunto de arquivos, variando só o perfil.
+#
+# Estes serviços estão atrás de `profiles:`, então NÃO sobem por padrão: um
+# `up -d` sem perfil levanta apenas a stack base. Isso é deliberado por dois
+# motivos, os dois observados na prática:
+#
+#   1. CARGA. Subir tudo (Postgres, Redis, API, 5 workers, ZAP, Caldera,
+#      OpenCTI, Juice Shop) esgota os recursos do WSL2 e derruba até o DNS
+#      embutido do Docker no meio de um scan.
+#   2. REDE. Invocar `docker compose` com CONJUNTOS DIFERENTES de arquivos
+#      recria `aperia_net` e deixa containers presos numa instância antiga de
+#      mesmo nome — o worker perde resolução de `zap`/`caldera` sem que nada
+#      no compose pareça errado. Com perfis, o conjunto de arquivos nunca muda.
+#
+# Rodando de dentro de `python-api/`, o conjunto de arquivos é sempre este; o
+# que varia é o `--profile` acrescentado antes de `up -d`:
+#
+#   docker compose -f docker-compose.base.yml \
+#                  -f docker-compose.scanners.yml \
+#                  -f docker-compose.targets.yml \
+#                  [--profile dast] [--profile emulation] [--profile cti] up -d
+#
+#   (nenhum perfil)       só a base — front, auth, pipeline T1/T2
+#   --profile dast        + ZAP e Juice Shop        → Tier 3 com DAST
+#   --profile emulation   + Caldera e o agente      → emulação MITRE ATT&CK
+#   --profile cti         + OpenCTI                 → ver docs/pendencias.md §3
 
 services:
   zap:
@@ -19,6 +43,10 @@ services:
     # owasp/zap2docker-stable para zaproxy/zap-stable só a partir do 2.15.0.
     image: zaproxy/zap-stable:2.16.1
     container_name: aperia-zap
+    profiles: [dast]
+    # A varredura ativa é o pico de consumo da stack. O teto evita que ela
+    # sozinha leve o WSL2 junto — prefira o scan falhar a máquina travar.
+    mem_limit: 2g
     command:
       - zap.sh
       - -daemon
@@ -40,6 +68,12 @@ services:
   opencti:
     image: opencti/platform:6.4.10
     container_name: aperia-opencti
+    profiles: [cti]
+    # NÃO reiniciar: falta um search engine na stack (docs/pendencias.md §3),
+    # então ele nunca sobe. Com restart automático virava crash-loop
+    # queimando CPU continuamente — custo real, benefício zero.
+    restart: "no"
+    mem_limit: 2g
     environment:
       APP__ADMIN__EMAIL: admin@aperia.local
       APP__ADMIN__PASSWORD: ${OPENCTI_ADMIN_PASSWORD:-changeme}
@@ -56,9 +90,28 @@ services:
   caldera:
     image: ghcr.io/mitre/caldera:5.0.0
     container_name: aperia-caldera
-    environment:
-      # API key consumido pelo CalderaClient — settings.CALDERA_API_KEY
-      CALDERA_API_KEY: ${CALDERA_API_KEY:-changeme}
+    profiles: [emulation]
+    mem_limit: 1g
+    # A env `CALDERA_API_KEY` NÃO vive aqui. Ela é consumida pelo
+    # `CalderaClient`, que roda no worker_tier3 — e o Caldera não lê essa
+    # variável: ele lê `conf/local.yml`. Definida neste serviço, ela não fazia
+    # nada, e a chave real (aleatória, assada na imagem) nunca batia com a do
+    # cliente: todo request voltava 401.
+    volumes:
+      - ./caldera/local.yml:/usr/src/app/conf/local.yml:ro
+    # A imagem 5.0.0 publicada quebra no boot com
+    # `ValueError: No directory exists at '/usr/src/app/plugins/magma/dist/assets'`.
+    # O `magma` é a INTERFACE WEB do Caldera: a imagem traz o código-fonte do
+    # plugin mas não os assets compilados, e `rest_api.py` registra a rota
+    # estática dele INCONDICIONALMENTE — tirar `magma` da lista de plugins do
+    # `local.yml` não evita (ele já não está lá e o crash acontece assim mesmo).
+    #
+    # Só consumimos a API REST de emulação; a UI é irrelevante aqui. O tmpfs
+    # cria o diretório vazio em memória, o que satisfaz a rota estática sem
+    # precisar compilar uma interface que ninguém vai abrir e sem sujar o repo
+    # com um diretório-placeholder.
+    tmpfs:
+      - /usr/src/app/plugins/magma/dist/assets
     ports:
       # Exposto APENAS para a rede interna; portas externas só para
       # debugging em dev — em prod, remover a publicação para que
@@ -69,6 +122,54 @@ services:
       # tier3 alcançar) + aperia_caldera_sandbox (rede interna onde
       # adversários simulam técnicas).
       - aperia_net
+      - aperia_caldera_sandbox
+
+  # ── Agente sandcat: o alvo que o Caldera de fato ataca ─────────────────────
+  #
+  # Sem agente, uma operação termina com cadeia VAZIA: `techniques_executed=0`
+  # e `caldera_validated=False`. Parece "emulação não achou nada" quando na
+  # verdade não havia onde executar.
+  #
+  # ⚠️  ESTE CONTAINER EXECUTA TÉCNICAS MITRE ATT&CK REAIS. Ele existe para ser
+  #     atacado. Por isso está **somente** em `aperia_caldera_sandbox`, que é
+  #     `internal: true` — sem rota para a internet nem para `aperia_net`.
+  #     Não adicione outra rede aqui: o isolamento é o único mecanismo que
+  #     impede movimento lateral de teste alcançar sistema real.
+  #
+  # Alpine porque o `wget` do busybox já vem embutido: a rede é `internal`, não
+  # há como instalar nada em runtime. O sandcat é binário Go estático, roda
+  # direto. `restart: unless-stopped` porque o agente precisa reconectar se o
+  # Caldera reiniciar — sem ele, a operação seguinte encontra o grupo vazio.
+  caldera-agent:
+    image: alpine:3.20
+    container_name: aperia-caldera-agent
+    profiles: [emulation]
+    mem_limit: 256m
+    depends_on:
+      - caldera
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        # O download É o teste de prontidão. Usar `GET /` como probe não
+        # funciona nesta imagem: ela responde 500 ("Template 'index.html' not
+        # found") porque a UI magma não vem compilada — a mesma causa do crash
+        # de boot que o tmpfs contorna. Esperar por um endpoint quebrado
+        # deixaria o agente preso para sempre.
+        echo "aguardando o Caldera servir o sandcat..."
+        until wget -q -O /tmp/sandcat \
+                --header='file:sandcat.go' \
+                --header='platform:linux' \
+                http://caldera:8888/file/download; do
+          sleep 3
+        done
+        chmod +x /tmp/sandcat
+        echo "conectando ao grupo ${CALDERA_AGENT_GROUP:-red}..."
+        exec /tmp/sandcat -server http://caldera:8888 \
+                          -group ${CALDERA_AGENT_GROUP:-red}
+    networks:
       - aperia_caldera_sandbox
 
 networks:

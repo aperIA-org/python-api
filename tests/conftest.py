@@ -43,6 +43,32 @@ def disable_findings_persistence():
 
 
 @pytest.fixture(autouse=True)
+def alvo_interno_bloqueado_por_padrao():
+    """Força a postura de PRODUÇÃO na validação de alvo de DAST.
+
+    ``ALLOW_INTERNAL_DAST_TARGETS`` é uma flag de desenvolvimento: sem ela não
+    há como apontar a ``target_url`` para um Juice Shop local
+    (``http://juice-shop:3000``), que é exatamente o que a proteção anti-SSRF
+    recusa.
+
+    O problema é que ``settings`` lê o ``.env`` do desenvolvedor. Com a flag
+    ligada localmente, os 13 testes que provam a recusa de alvo interno
+    (loopback, RFC1918, metadata de cloud) passavam a falhar — ou, pior, num
+    cenário invertido, passariam a "passar" sem testar nada.
+
+    Um flag local não pode decidir se os testes de segurança rodam. O padrão
+    aqui é sempre ``False``; quem exercita a liberação passa
+    ``permitir_alvo_interno=True`` explicitamente ou religa o setting.
+    """
+    original = settings.ALLOW_INTERNAL_DAST_TARGETS
+    settings.ALLOW_INTERNAL_DAST_TARGETS = False
+    try:
+        yield
+    finally:
+        settings.ALLOW_INTERNAL_DAST_TARGETS = original
+
+
+@pytest.fixture(autouse=True)
 def disable_scan_persistence():
     """Desliga a persistência best-effort do ScanJob por padrão.
 

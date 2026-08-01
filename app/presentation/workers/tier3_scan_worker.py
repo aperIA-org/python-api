@@ -109,6 +109,7 @@ def run_tier3_scan(
     commit_sha: str,
     repo_url: str,
     adversary_name: str | None = None,
+    mitre_techniques: list[str] | None = None,
 ) -> dict[str, Any]:
     # ---- ZAP DAST ----
     zap_findings: list[Finding] = []
@@ -139,7 +140,19 @@ def run_tier3_scan(
     # ---- Caldera ----
     caldera_results: dict[str, Any]
     try:
-        techniques = cti_merged.get("mitre_techniques", [])
+        # União das duas fontes, cadeia do Tier 2 primeiro.
+        #
+        # A do CTI sozinha nunca produzia nada: depende do OpenCTI (que não sobe
+        # nesta stack) e de haver CVE nos findings. Secrets e regras do Semgrep
+        # não têm CVE, então `mitre_techniques` era sempre `[]` e o Caldera
+        # emulava um adversário vazio — dando "unavailable" no relatório.
+        #
+        # O CTI continua somando quando existir: ele traz técnicas observadas em
+        # ameaça ativa, que a análise do código não teria como inferir.
+        techniques = list(mitre_techniques or [])
+        for ttp in cti_merged.get("mitre_techniques", []) or []:
+            if ttp and ttp not in techniques:
+                techniques.append(ttp)
         caldera = CalderaClient()
         caldera_results = caldera.run_safe(
             adversary_name=adversary_name or f"pr-{commit_sha[:8]}",

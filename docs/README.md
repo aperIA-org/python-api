@@ -10,6 +10,7 @@ consultar um fato ou entender um conceito. Comece pelo quadrante certo:
 | **Resolver** uma tarefa específica | [How-to guides](#how-to-guides) | How-to |
 | **Consultar** rotas, variáveis, modelos | [referencia.md](referencia.md) | Reference |
 | **Entender** como o pipeline funciona e por quê | [explicacao-pipeline.md](explicacao-pipeline.md) | Explanation |
+| **Saber o que falta** e por onde seguir | [pendencias.md](pendencias.md) | — |
 
 ## Tutorial
 

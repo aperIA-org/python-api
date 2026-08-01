@@ -11,6 +11,7 @@ Cobertura obrigatória (Semana 10):
 from __future__ import annotations
 
 import inspect
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -58,7 +59,7 @@ class TestHappyPath:
     @respx.mock
     def test_full_pipeline_returns_metrics(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-1"})
@@ -93,7 +94,7 @@ class TestHappyPath:
     @respx.mock
     def test_zero_successful_yields_caldera_validated_false(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-1"})
@@ -118,7 +119,7 @@ class TestHappyPath:
     @respx.mock
     def test_create_adversary_payload(self):
         route = respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-9"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-9"})
         )
         client = _build_client()
         adv_id = client.create_adversary("my-adv", ["T1190"])
@@ -164,7 +165,7 @@ class TestTimeout:
     def test_run_safe_timeout_returns_status_failed(self):
         """Cenário obrigatório do checklist Semana 10."""
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-stuck"})
@@ -202,7 +203,7 @@ class TestFaultIsolation:
     @respx.mock
     def test_run_operation_connection_error_yields_failed(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             side_effect=httpx.ConnectError("Connection refused")
@@ -214,7 +215,7 @@ class TestFaultIsolation:
     @respx.mock
     def test_await_results_500_yields_failed(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-x"})
@@ -231,19 +232,92 @@ class TestFaultIsolation:
 # -----------------------------------------------------------------------------
 
 
-class TestMapToAbilitiesDebt:
-    def test_returns_empty_list_in_mvp(self):
-        client = _build_client()
-        assert client._map_to_abilities(["T1190", "T1059"]) == []
+def _resp(payload):
+    """Resposta httpx mínima para os testes de mapeamento."""
+    r = MagicMock()
+    r.json.return_value = payload
+    r.raise_for_status.return_value = None
+    return r
 
-    def test_debt_comment_documents_impact(self):
-        source = inspect.getsource(
-            mitre_caldera_client.CalderaClient._map_to_abilities
+
+class TestMapToAbilities:
+    """O stub que devolvia `[]` foi implementado.
+
+    Enquanto existiu, o adversário nascia sem nenhuma ability: a operação
+    terminava com cadeia vazia e `caldera_validated` era sempre False. Parecia
+    "emulação não encontrou nada" quando nada havia sido executado.
+
+    O formato foi validado contra o Caldera 5.0.0 real: a API v2 NÃO filtra por
+    técnica (`?technique_id=` responde 422), e o catálogo usa sub-técnicas
+    (`T1497.003`).
+    """
+
+    def _ability(self, ability_id: str, technique_id: str, plataforma: str = "linux"):
+        return {
+            "ability_id": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": plataforma, "command": "id"}],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_busca_o_catalogo_uma_vez_so(self):
+        """`?technique_id=` devolve 422 no Caldera real — filtro é local."""
+        client = self._com_catalogo(
+            [self._ability("a1", "T1059"), self._ability("a2", "T1082")]
         )
-        assert "DEBT" in source
-        assert "caldera_validated" in source
-        # Impacto observável documentado conforme decisão #2
-        assert "False" in source or "false" in source
+
+        assert client._map_to_abilities(["T1059", "T1082"]) == ["a1", "a2"]
+        assert client.client.get.call_count == 1
+        assert client.client.get.call_args[0][0] == "/api/v2/abilities"
+
+    def test_tecnica_pai_casa_com_subtecnicas(self):
+        """Pedir `T1497` traz `T1497.003`; o catálogo real usa sub-técnicas."""
+        client = self._com_catalogo(
+            [self._ability("sub", "T1497.003"), self._ability("outra", "T1082")]
+        )
+
+        assert client._map_to_abilities(["T1497"]) == ["sub"]
+
+    def test_subtecnica_exata_nao_traz_irmas(self):
+        client = self._com_catalogo(
+            [self._ability("a", "T1497.001"), self._ability("b", "T1497.003")]
+        )
+
+        assert client._map_to_abilities(["T1497.003"]) == ["b"]
+
+    def test_ignora_ability_sem_executor_linux(self):
+        """O agente do sandbox roda Linux: ability de Windows vira link que
+        falha e derruba o `success_rate` por motivo alheio ao alvo."""
+        client = self._com_catalogo(
+            [
+                self._ability("win", "T1059", "windows"),
+                self._ability("lin", "T1059", "linux"),
+            ]
+        )
+
+        assert client._map_to_abilities(["T1059"]) == ["lin"]
+
+    def test_tecnica_sem_correspondencia_devolve_vazio(self):
+        client = self._com_catalogo([self._ability("a1", "T1059")])
+
+        assert client._map_to_abilities(["T9999"]) == []
+
+    def test_falha_ao_buscar_catalogo_nao_derruba(self):
+        client = _build_client()
+        client.client.get = MagicMock(side_effect=RuntimeError("boom"))
+
+        assert client._map_to_abilities(["T1059"]) == []
+
+    def test_lista_vazia_nao_faz_requisicao(self):
+        client = _build_client()
+        client.client.get = MagicMock()
+
+        assert client._map_to_abilities([]) == []
+        client.client.get.assert_not_called()
 
 
 # -----------------------------------------------------------------------------
@@ -264,3 +338,49 @@ class TestParseResults:
         client = _build_client()
         result = client._parse_results({"state": "finished"})
         assert result["techniques_executed"] == 0
+
+
+class TestContratoRealDaApiV2:
+    """Fixa os nomes de campo conferidos contra o Caldera 5.0.0 em execução.
+
+    Os testes antigos mockavam `{"id": ...}` para o adversário e por isso
+    **concordavam com o bug**: em produção o POST retornava 200 e o cliente
+    estourava `KeyError: 'id'`, que o `run_safe` traduzia para "Caldera
+    unavailable" — parecendo falha de conectividade numa chamada que funcionou.
+
+    A assimetria é real e fácil de reintroduzir:
+      - adversário → `adversary_id`
+      - operação   → `id`
+    """
+
+    @respx.mock
+    def test_create_adversary_le_adversary_id(self):
+        respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
+            return_value=httpx.Response(200, json={"adversary_id": "adv-real"})
+        )
+        assert _build_client().create_adversary("x", []) == "adv-real"
+
+    @respx.mock
+    def test_create_adversary_falha_alto_se_campo_sumir(self):
+        """Se a API mudar, é melhor estourar do que devolver id silenciosamente
+        errado — um id inválido faria a operação rodar sem adversário."""
+        respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
+            return_value=httpx.Response(200, json={"nome_inesperado": "x"})
+        )
+        with pytest.raises(KeyError):
+            _build_client().create_adversary("x", [])
+
+    @respx.mock
+    def test_operacao_referencia_o_adversario_por_adversary_id(self):
+        """O payload da operação também usa `adversary_id`; mandar `id` cria
+        uma operação sem adversário, que termina com cadeia vazia."""
+        rota = respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-real"})
+        )
+
+        assert _build_client().run_operation("adv-real") == "op-real"
+
+        import json as _json
+
+        enviado = _json.loads(rota.calls[0].request.content)
+        assert enviado["adversary"] == {"adversary_id": "adv-real"}

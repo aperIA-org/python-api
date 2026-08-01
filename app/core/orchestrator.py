@@ -53,6 +53,22 @@ logger = structlog.get_logger()
 # uma é JSON-serializável e idempotente.
 
 
+def _tecnicas_da_cadeia(tier2_analysis: dict[str, Any]) -> list[str]:
+    """Extrai os IDs MITRE do `event_chain`, sem repetir e na ordem dos passos.
+
+    O schema do Tier 2 define `technique` como `"<TXXXX ou null>"`, então
+    passos sem técnica identificada são normais e simplesmente não entram.
+    """
+    tecnicas: list[str] = []
+    for passo in tier2_analysis.get("event_chain", []) or []:
+        if not isinstance(passo, dict):
+            continue
+        tecnica = str(passo.get("technique") or "").strip().upper()
+        if tecnica and tecnica != "NULL" and tecnica not in tecnicas:
+            tecnicas.append(tecnica)
+    return tecnicas
+
+
 @celery_app.task(
     name="app.core.orchestrator._prepare_tier3_payload",
     bind=True,
@@ -83,11 +99,24 @@ def _prepare_tier3_payload(
     if not tier2_analysis or not isinstance(tier2_analysis, dict):
         return None
     t2_findings = tier2_analysis.get("findings", []) or []
+
+    # As técnicas MITRE da cadeia de ataque do Tier 2 são a fonte primária para
+    # a emulação. Antes o Tier 3 só conhecia as técnicas vindas do
+    # enriquecimento CTI — que depende do OpenCTI (fora do ar) e de haver CVEs
+    # nos findings. Sem CVE e sem CTI, `mitre_techniques` era SEMPRE vazio: o
+    # Caldera recebia um adversário sem abilities e não executava nada.
+    #
+    # O Tier 2 já mapeia MITRE ATT&CK em cada passo do `event_chain` — é
+    # literalmente a correlação que o produto promete. Ignorá-la e depender de
+    # uma fonte externa opcional era desperdiçar o dado mais relevante.
+    tecnicas_do_tier2 = _tecnicas_da_cadeia(tier2_analysis)
+
     t3_result = tier3_scan_worker.run_tier3_scan.run(
         target_url=target_url,
         t2_findings=t2_findings,
         commit_sha=commit_sha,
         repo_url=repo_url,
+        mitre_techniques=tecnicas_do_tier2,
     )
     return {
         "tier2_analysis": tier2_analysis,

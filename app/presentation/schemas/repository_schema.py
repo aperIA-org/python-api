@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 from pydantic_core import PydanticCustomError
 
+from app.config import settings
 from app.domain.github.target_url import (
     TargetUrlInvalidaError,
     validar_target_url,
@@ -28,7 +29,10 @@ def _valida_target_url(valor: object) -> object:
     if valor is None:
         return None
     try:
-        return validar_target_url(valor)
+        return validar_target_url(
+            valor,
+            permitir_alvo_interno=settings.ALLOW_INTERNAL_DAST_TARGETS,
+        )
     except TargetUrlInvalidaError as exc:
         raise PydanticCustomError(exc.codigo, exc.mensagem) from exc
 

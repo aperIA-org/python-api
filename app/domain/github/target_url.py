@@ -124,10 +124,25 @@ def _ip_e_interno(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return any(ip in rede for rede in _REDES_EXTRA_BLOQUEADAS)
 
 
-def validar_target_url(valor: object) -> str:
+def validar_target_url(valor: object, *, permitir_alvo_interno: bool = False) -> str:
     """Valida a URL de aplicação e devolve a forma normalizada (sem espaços).
 
     Levanta ``TargetUrlInvalidaError`` — quem chama traduz para 422.
+
+    ``permitir_alvo_interno`` libera **apenas** as recusas de rede interna
+    (loopback, RFC1918, link-local, sufixos internos, host de rótulo único).
+    Esquema, credenciais embutidas, tamanho e formato continuam validados —
+    a flag não é um "aceite qualquer coisa".
+
+    Existe por uma lacuna real: sem ela **não há caminho suportado para testar
+    DAST em desenvolvimento**. Um alvo local é `http://juice-shop:3000` ou
+    `localhost`, exatamente o que a proteção recusa. O default é ``False``, e a
+    decisão de ligar fica com quem opera (``ALLOW_INTERNAL_DAST_TARGETS``) —
+    nunca em produção, onde alvo interno significa usar o aperIA para atacar a
+    própria infraestrutura.
+
+    O parâmetro é explícito em vez de lido de ``settings`` porque este módulo é
+    domínio puro: a regra não muda, quem decide o contexto é a borda.
     """
     if not isinstance(valor, str):
         raise TargetUrlInvalidaError(
@@ -190,7 +205,7 @@ def validar_target_url(valor: object) -> str:
     host = hostname.lower().rstrip(".")
     ip = _ip_de_hostname(host)
     if ip is not None:
-        if _ip_e_interno(ip):
+        if not permitir_alvo_interno and _ip_e_interno(ip):
             raise TargetUrlInvalidaError(
                 "target_url_alvo_bloqueado",
                 f"Alvo bloqueado: {host} aponta para a rede interna. "
@@ -198,13 +213,15 @@ def validar_target_url(valor: object) -> str:
             )
         return url
 
-    if host in _HOSTS_BLOQUEADOS or host.endswith(_SUFIXOS_BLOQUEADOS):
+    if not permitir_alvo_interno and (
+        host in _HOSTS_BLOQUEADOS or host.endswith(_SUFIXOS_BLOQUEADOS)
+    ):
         raise TargetUrlInvalidaError(
             "target_url_alvo_bloqueado",
             f"Alvo bloqueado: {host} aponta para a rede interna. "
             "Informe a URL publica do ambiente de staging/preview.",
         )
-    if "." not in host:
+    if not permitir_alvo_interno and "." not in host:
         # Host de rótulo único (``http://zap``, ``http://api-interna``) só
         # resolve dentro da rede do worker — na internet pública não existe.
         raise TargetUrlInvalidaError(

@@ -51,7 +51,17 @@ class Settings(BaseSettings):
 
     # ---- Adversary Emulation (Caldera) ----
     CALDERA_URL: str = "http://caldera:8888"
-    CALDERA_API_KEY: str = ""
+    # Precisa bater com `api_key_red` de `caldera/local.yml` (montado no
+    # container). A imagem gera uma chave aleatória por versão, então alinhar
+    # por default só funciona porque fixamos a chave pelo config montado.
+    CALDERA_API_KEY: str = "aperia-dev-caldera-red"
+
+    # Libera alvo de DAST em rede interna (localhost, RFC1918, host de rótulo
+    # único). Default FALSO: em produção, alvo interno significa usar o aperIA
+    # para atacar a própria infraestrutura. Existe porque sem ela não há caminho
+    # suportado para testar DAST em desenvolvimento — um Juice Shop local é
+    # `http://juice-shop:3000`, exatamente o que a proteção recusa.
+    ALLOW_INTERNAL_DAST_TARGETS: bool = False
     CALDERA_SANDBOX_MODE: bool = True
     CALDERA_POLL_INTERVAL: int = 10  # testes injetam 0 via construtor
     CALDERA_AGENT_GROUP: str = "red"

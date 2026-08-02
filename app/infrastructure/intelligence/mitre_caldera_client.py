@@ -104,6 +104,10 @@ class CalderaClient:
         return resp.json()["adversary_id"]
 
     def run_operation(self, adversary_id: str) -> str:
+        # Antes de disparar: quantos alvos esse grupo tem, afinal? Ver o
+        # docstring de `_registrar_agentes_do_grupo` — é diagnóstico, nunca
+        # bloqueia a operação.
+        self._registrar_agentes_do_grupo(settings.CALDERA_AGENT_GROUP)
         resp = self.client.post(
             "/api/v2/operations",
             json={
@@ -181,6 +185,59 @@ class CalderaClient:
             return _failed_result(type(exc).__name__)
 
     # -------------------------------------------------------- internals
+
+    #: O sandbox tem UM container de agente (`caldera-agent` no compose), logo
+    #: um grupo saudável tem exatamente um agente. Ver `_registrar_agentes_do_grupo`.
+    AGENTES_ESPERADOS: int = 1
+
+    def _registrar_agentes_do_grupo(self, grupo: str) -> int | None:
+        """Loga quantos agentes o grupo tem ANTES de criar a operação.
+
+        Uma operação do Caldera executa cada ability em **todos** os agentes do
+        grupo. Com N agentes o trabalho é N×, a técnica MITRE real roda N vezes,
+        e o ``success_rate`` sai calculado sobre uma amostra inflada que não
+        corresponde a alvo nenhum. Aconteceu de verdade: o serviço do agente
+        reiniciava e registrava um agente novo a cada vez, chegando a 20 — e o
+        número não aparecia em log algum, então o problema só apareceu quando
+        alguém foi investigar outra coisa. Este log é o que torna esse sintoma
+        visível na próxima vez.
+
+        Filtro local, uma requisição só — mesmo motivo de ``_map_to_abilities``:
+        a lista de agentes é pequena e a API v2 cobra um formato de query
+        próprio para filtrar.
+
+        Best-effort como o resto do cliente: falha aqui devolve ``None`` e a
+        operação segue. Diagnóstico não pode derrubar o pipeline.
+        """
+        try:
+            resp = self.client.get("/api/v2/agents")
+            resp.raise_for_status()
+            agentes = resp.json() or []
+        except Exception as exc:  # noqa: BLE001 — best-effort, só diagnóstico
+            logger.warning("caldera_contagem_de_agentes_falhou", error=str(exc))
+            return None
+
+        do_grupo = [
+            a
+            for a in agentes
+            if isinstance(a, dict) and str(a.get("group") or "") == grupo
+        ]
+        paws = [str(a.get("paw") or "") for a in do_grupo]
+        total = len(do_grupo)
+
+        evento = logger.info if total == self.AGENTES_ESPERADOS else logger.warning
+        evento(
+            "caldera_agentes_do_grupo",
+            grupo=grupo,
+            agentes=total,
+            esperados=self.AGENTES_ESPERADOS,
+            # A lista inteira, não uma amostra: com PAW fixo ela tem um item, e
+            # quando não tiver, os PAWs são exatamente o que se precisa para
+            # saber quais remover.
+            paws=paws,
+            confiavel=sum(1 for a in do_grupo if a.get("trusted")),
+        )
+        return total
 
     def _map_to_abilities(self, techniques: list[str]) -> list[str]:
         """Traduz TTPs MITRE (``T1059``) em ability IDs do Caldera.

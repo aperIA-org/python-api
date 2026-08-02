@@ -575,3 +575,49 @@ class TestEdgeCases:
             target_url=_TARGET, commit_sha="a" * 40, repo_url="x"
         )
         assert findings[0].cwe_id is None
+
+
+class TestRotaPreservadaNoDedup:
+    """A URL precisa chegar ao `dedup_key`, senão rotas distintas colapsam.
+
+    O `dedup_key` é `source:titulo:file_path:line_number:commit`. Enquanto a URL
+    ficava só em `asset`, todo alerta do mesmo tipo virava um único finding:
+    **369 alertas do Juice Shop viraram 8**. Os tipos estavam certos, mas com
+    `file_path` vazio — sabia-se *que* faltava CSP, não *em quais rotas*.
+    """
+
+    def _alerta(self, nome: str, url: str) -> dict:
+        return {"name": nome, "risk": "Medium", "url": url, "description": "d"}
+
+    def _finding(self, alerta: dict):
+        return ZAPScanner()._to_finding(alerta, "a" * 40, "https://github.com/org/juice-shop")
+
+    def test_caminho_vai_para_file_path(self):
+        f = self._finding(self._alerta("CSP ausente", "http://alvo:3000/rest/user/login"))
+        assert f.file_path == "/rest/user/login"
+
+    def test_query_string_conta_como_rota_distinta(self):
+        """`/search?q=` é outra superfície que `/search`."""
+        f = self._finding(self._alerta("XSS", "http://alvo:3000/search?q=x"))
+        assert f.file_path == "/search?q=x"
+
+    def test_host_nao_entra(self):
+        """O host é sempre o alvo do scan — repeti-lo em toda linha é ruído."""
+        f = self._finding(self._alerta("CSP", "http://juice-shop:3000/api/v1"))
+        assert "juice-shop" not in (f.file_path or "")
+
+    def test_rotas_distintas_geram_dedup_keys_distintas(self):
+        a = self._finding(self._alerta("CSP ausente", "http://alvo:3000/login"))
+        b = self._finding(self._alerta("CSP ausente", "http://alvo:3000/admin"))
+        assert a.dedup_key() != b.dedup_key()
+
+    def test_mesmo_alerta_na_mesma_rota_ainda_deduplica(self):
+        """O dedup continua fazendo o trabalho dele."""
+        a = self._finding(self._alerta("CSP ausente", "http://alvo:3000/login"))
+        b = self._finding(self._alerta("CSP ausente", "http://alvo:3000/login"))
+        assert a.dedup_key() == b.dedup_key()
+
+    def test_asset_e_o_repositorio_nao_a_url(self):
+        """Consistência com os demais scanners: a UI mostra o projeto ali."""
+        f = self._finding(self._alerta("CSP", "http://alvo:3000/x"))
+        assert f.asset == "juice-shop"

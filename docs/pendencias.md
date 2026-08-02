@@ -66,59 +66,37 @@ Compose protege contra isso.
 
 ---
 
-## 1. DNS do Docker cai sob carga (bloqueia validar o Tier 3)
+## 1–2. Tier 3 de ponta a ponta — RESOLVIDO (2026-08-02)
 
-**Sintoma.** No meio de um scan DAST, o worker perde resolução de nome para
-*todos* os serviços ao mesmo tempo:
+O pipeline completou: **tier1 done → tier2 done → tier3 done**, risco 72/100
+`high`, com o ZAP produzindo **369 alertas em 190 s** dentro do limite de
+memória.
 
-```
-19:39:41  GET http://zap:8090/JSON/ascan/view/status/  200 OK
-19:39:51  GET http://zap:8090/JSON/ascan/view/status/  200 OK
-19:40:02  GET http://zap:8090/JSON/ascan/view/status/  200 OK
-19:40:23  scanner_skipped  error='[Errno -3] Temporary failure in name resolution'
-19:40:34  caldera_run_safe_failed  error='[Errno -3] Temporary failure in name resolution'
-```
+O DNS instável do §1 não voltou a acontecer. Ele era sintoma de exaustão de
+recursos, e três mudanças tiraram a pressão: perfis do Compose (§0), heap da
+JVM do ZAP corrigido, e a regra de DOM XSS desligada (que subia Firefox
+headless real dentro do mesmo cgroup).
 
-**O que já está descartado.** Não é configuração de rede nem credencial: minutos
-antes do scan, os três respondiam `HTTP 200` a partir do próprio worker. O
-código de erro é `EAI_AGAIN` (**-3**, servidor de DNS não respondeu), não
-`EAI_NONAME` (-2, host inexistente) — timeout, não nome errado.
+A armadilha de rede que o §1 também descrevia — invocar `docker compose` com
+conjuntos diferentes de arquivos, deixando containers presos numa rede antiga —
+continua valendo como **regra operacional**: use sempre o mesmo conjunto de
+arquivos, variando só o `--profile`. Ela se manifestou uma última vez como
+`network <id> not found`, resolvida removendo os containers obsoletos.
 
-**Hipótese principal.** Exaustão de recursos do WSL2 derrubando o DNS embutido
-do Docker (`127.0.0.11`). Encaixa com o perfil: resolve parado, falha durante a
-varredura ativa, que é o momento de pico.
+### O que o ZAP funcionando revelou
 
-**Armadilha adicional já observada e corrigida.** Rodar `docker compose` com
-*conjuntos diferentes de arquivos* recria a rede e deixa containers presos numa
-instância antiga com o mesmo nome. Ficou assim por um tempo:
+Três defeitos que estavam escondidos atrás do ZAP sempre devolver zero:
 
-```
-python-api_aperia_net → api, db, redis, 5 workers      (zap/caldera/juice-shop FORA)
-```
-
-**Regra que evita:** sempre invocar compose com o **mesmo conjunto completo** de
-arquivos, ou usar `--force-recreate` nos serviços que ficaram para trás.
-
-**Próximos passos**
-1. Repetir o scan com a máquina ociosa e só `base + zap + juice-shop` no ar.
-2. Se reproduzir, medir: `docker stats` durante o scan e limites de memória do
-   WSL (`.wslconfig`).
-3. Mitigação de código, se o ambiente não permitir folga: resolver o host uma
-   vez e reusar o IP, ou retry com re-resolução nos clients de ZAP/Caldera.
-   **Só depois de confirmar que é ambiente** — mitigar antes esconde a causa.
-
----
-
-## 2. Tier 3 nunca completou de ponta a ponta
-
-O caminho está **provado até o polling**: o ZAP autentica, o scan ativo é
-lançado e acompanhado por mais de um minuto. O que falta é uma execução que
-chegue ao fim e grave `zap_findings > 0`.
-
-Bloqueado por §1. Sem novidade de código — é validação.
-
-**Próximo passo.** Com a máquina folgada, disparar scan no `juice-shop` local e
-conferir `tier3_scan_complete` com `zap_findings` diferente de zero.
+1. **Prompt estourando a janela de contexto** — `357.218 tokens > 200.000`. Os
+   369 alertas iam inteiros para o prompt do relatório, cada um com o
+   `raw_output` bruto. Corrigido: teto de 40 findings ordenados por severidade,
+   `raw_output` descartado, descrição truncada, e um `findings_resumo` que
+   declara o que ficou de fora (2.245.860 → 20.404 caracteres).
+2. **Emojis nos relatórios** — removidos dos templates, proibidos no prompt, e
+   removidos de forma determinística no `ClaudeClient`, porque instrução em
+   prompt é pedido e não contrato.
+3. **Healthcheck do ZAP mentindo** — apontava para a porta 8080 enquanto o
+   daemon serve na 8090; o container vivia `unhealthy` funcionando normalmente.
 
 ---
 
@@ -148,57 +126,39 @@ Enquanto não se decide, o container está parado.
 
 ---
 
-## 4. Caldera — RESOLVIDO (2026-08-01), falta validar em execução
+## 4. Caldera — validado em execução, com duas ressalvas
 
-Três bloqueios distintos, resolvidos em sequência:
+Quatro bloqueios resolvidos: crash no boot (assets do `magma`), chave de API
+aleatória por imagem, nomes de campo errados no cliente
+(**`adversary_id` no adversário, `id` na operação** — ler `id` no adversário
+levantava `KeyError` logo após um POST 200, e o `run_safe` traduzia para
+"Caldera unavailable"), e a ausência de técnicas.
 
-**1. Crash no boot.** A imagem `5.0.0` traz o código-fonte do plugin `magma` (a
-UI web) mas não os assets compilados, e `rest_api.py` registra a rota estática
-dele **incondicionalmente**. Contornado com `tmpfs` no caminho esperado.
+Sobre as técnicas: elas vinham **só do enriquecimento CTI**, que depende do
+OpenCTI (§3) e de haver CVE nos findings. Secrets e regras do Semgrep não têm
+CVE, então a lista era sempre vazia. Agora a fonte primária é o `event_chain`
+do Tier 2 — que já mapeia MITRE ATT&CK e é literalmente a correlação que o
+produto promete.
 
-**2. Chave de API.** A imagem gera `api_key_red` aleatório por versão; nosso
-cliente mandava `''`. Fixada por `caldera/local.yml` montado.
+Provado em execução: `caldera_status=ok`, agente registrado
+(`grupo=red platform=linux`), e uma operação com 44 elos executados.
 
-```
-chave vazia (antes)        HTTP 401
-chave de caldera/local.yml HTTP 200
-```
+**Ressalva 1 — cobertura do catálogo.** Numa execução as 6 técnicas do Tier 2
+mapearam para **zero** abilities (`descartadas=0`, ou seja, nem chegaram ao
+filtro): simplesmente não existem no catálogo de 162. Noutra, as 6 abilities
+encontradas eram todas de exfiltração para Dropbox/GitHub/S3, que exigem
+credencial externa e não rodam no sandbox `internal: true` — corretamente
+descartadas agora, com o motivo no log.
 
-**3. Não havia o que executar — e este era o bloqueio real.**
-`_map_to_abilities()` era um stub com `return []`: o adversário nascia **sem
-nenhuma ability**, a operação terminava com cadeia vazia e
-`caldera_validated` era sempre `False`. Parecia "emulação não achou nada"
-quando nada havia sido executado — a mesma confusão entre *não achei* e *não
-procurei* que já tinha aparecido no Tier 1.
+Como a análise do Tier 2 não é determinística, **a emulação varia entre scans
+do mesmo commit**. Vale calibrar expectativa: `caldera_validated: true` é
+possível, não garantido.
 
-Implementado e **validado contra o Caldera real**, o que corrigiu duas
-suposições minhas que estavam erradas:
-
-| Suposição | Realidade |
-|---|---|
-| `GET /api/v2/abilities?technique_id=T1082` filtra | responde **422**; filtro é local |
-| N requisições, uma por técnica | catálogo tem 162 abilities — **uma** requisição basta |
-| `technique_id` é sempre `T1082` | também há sub-técnicas (`T1497.003`) |
-
-Mapeamento conferido no catálogo real: `T1082` → 2 abilities linux,
-`T1059` → 1, `T1497` → 1 (via sub-técnica), as três juntas com `T1057` → 7.
-
-**4. Agente sandcat.** Novo serviço `caldera-agent` (perfil `emulation`),
-**somente** na rede `aperia_caldera_sandbox` (`internal: true`) porque executa
-técnicas MITRE reais. Registrado e confirmado:
-
-```
-agentes registrados: 1
-  grupo=red plataforma=linux host=8fb03b1de862
-```
-
-O probe de prontidão do agente é o **próprio download do sandcat**: usar
-`GET /` não funciona, porque nesta imagem ele responde 500
-(`Template 'index.html' not found`) — mesma causa do crash de boot. Esperar por
-um endpoint quebrado prenderia o agente para sempre.
-
-**O que falta:** uma operação real de ponta a ponta, com `caldera_validated`
-vindo `True`. Só depende de rodar — ver §2.
+**Ressalva 2 — agentes acumulando.** Há **20 agentes** registrados, todos
+`trusted`. Cada reinício do container cria um novo, por causa do
+`restart: unless-stopped`. Não quebra nada, mas infla as operações (3 abilities
+viraram 44 elos) e piora com o tempo. Vale o agente reusar identidade entre
+reinícios, ou uma limpeza periódica.
 
 ---
 
@@ -227,9 +187,18 @@ detector** (`Chatbot`) repetido em arquivos de tradução. O `dedup_key` inclui 
 caminho, então cada arquivo vira uma linha — correto para o banco, ruim para
 leitura.
 
-**Próximo passo.** Agrupar na UI por `secret_type` + valor, com contagem e
-expansão ("49 ocorrências em `frontend/src/assets/i18n/`"). É mudança de
-apresentação; o dado no banco não precisa mudar.
+**E o ZAP expôs o problema oposto, mais grave.** Os **369 alertas** dele viraram
+**8 findings**: o `dedup_key` colapsou centenas de ocorrências por URL. Os 8
+tipos estão corretos (CSP ausente, Cross-Domain Misconfiguration…), mas
+`file_path` ficou **vazio em todos** — o ZAP reporta URL, não arquivo, e essa
+dimensão se perdeu. Você sabe *que* falta CSP, não *em quais rotas*.
+
+O mesmo mecanismo, portanto, afoga a lista com findings idênticos do TruffleHog
+e joga fora o dado mais útil do ZAP.
+
+**Próximo passo.** Duas frentes: na UI, agrupar por `secret_type` + valor com
+contagem e expansão; no mapeamento do ZAP, preservar a URL (em `file_path` ou
+campo próprio) para o dedup não colapsar rotas distintas.
 
 ---
 

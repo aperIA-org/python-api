@@ -20,6 +20,7 @@ Princípios:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,33 @@ from app.infrastructure.ai.token_metrics import (
 )
 
 logger = structlog.get_logger()
+
+
+# Faixas de emoji, símbolos e dingbats. As acentuadas do português vivem no
+# Latin-1 Supplement (bem abaixo de U+2600) e os travessões usados nos
+# relatórios são U+2013/U+2014 — nenhum deles é tocado.
+_EMOJI = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # emoji, pictogramas, símbolos suplementares
+    "\u2600-\u27BF"           # símbolos diversos e dingbats (inclui ✓ e ⚠)
+    "\u2B00-\u2BFF"           # setas e formas
+    "\uFE0F"                   # seletor de variação (o "️" de 🛡️)
+    "\u200D"                   # zero-width joiner (emojis compostos)
+    "]+"
+)
+
+
+def remover_emojis(texto: str) -> str:
+    """Tira emojis do texto gerado pelo modelo.
+
+    O prompt já pede para não usar, mas **instrução não é contrato**: o modelo
+    decora relatório de segurança por conta própria com frequência, e o
+    relatório vai para PR, dashboard e export — lugares onde ícone atrapalha
+    mais do que ajuda. Aqui a remoção é determinística.
+
+    Colapsa o espaço duplo que sobra quando o emoji estava entre palavras.
+    """
+    return re.sub(r"[ \t]{2,}", " ", _EMOJI.sub("", texto)).strip()
 
 
 class ClaudeClientError(Exception):
@@ -159,7 +187,7 @@ class ClaudeClient:
         self._breaker.record_success()
         record_request_outcome(model, "success")
 
-        text = self._extract_text(message)
+        text = remover_emojis(self._extract_text(message))
         usage = getattr(message, "usage", None)
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0)

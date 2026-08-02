@@ -18,10 +18,11 @@ REGRAS:
 2. Se "cti_status" == "unavailable", NÃO mencione campanhas ou atores.
 3. Se "caldera_status" == "unavailable", NÃO afirme exploração bem-sucedida.
 4. Tom: direto, acionável, em português brasileiro.
-5. Tamanho: máximo 25 linhas de markdown.
+5. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
+6. Tamanho: máximo 25 linhas de markdown.
 
 Formato:
-## 🛡️ aperIA — Análise de Segurança (Tier 2)
+## aperIA — Análise de Segurança (Tier 2)
 
 **Risk Score:** <score>/100 (<level>)
 

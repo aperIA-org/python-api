@@ -182,10 +182,17 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         )
         self.db.flush()
 
+    # Ordenar por ``created_at`` afundaria uma reexecução: ``restart_execution``
+    # preserva o ``created_at`` (entrada do commit no sistema) e só reseta os
+    # timestamps de tier, então rescanear um commit antigo o deixava no fim da
+    # lista mesmo tendo acabado de rodar. O COALESCE cobre jobs enfileirados que
+    # ainda não iniciaram o Tier 1.
+    _EXECUTADO_EM = func.coalesce(ScanJobModel.tier1_started_at, ScanJobModel.created_at)
+
     def list_recent(self, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
         result = self.db.execute(
             select(ScanJobModel)
-            .order_by(ScanJobModel.created_at.desc())
+            .order_by(self._EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -199,7 +206,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         result = self.db.execute(
             select(ScanJobModel)
             .where(ScanJobModel.user_id == user_id)
-            .order_by(ScanJobModel.created_at.desc())
+            .order_by(self._EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -219,7 +226,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         result = self.db.execute(
             select(ScanJobModel)
             .where(ScanJobModel.repository_id == repository_id)
-            .order_by(ScanJobModel.created_at.desc())
+            .order_by(self._EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )

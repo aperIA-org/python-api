@@ -943,3 +943,88 @@ terminou no tempo", e é a primeira coisa que se quer saber. Um blip isolado de
 rede também deixou de custar o scan inteiro — um `ReadTimeout` num poll (cuja
 mensagem é literalmente `timed out`) é tolerado até três vezes seguidas antes
 de declararmos o daemon morto.
+
+---
+
+## 14. Por que o Caldera tem um agente, e não vinte
+
+O Caldera precisa de um alvo. Sem nenhum agente registrado, a operação termina
+com cadeia vazia (`techniques_executed=0`, `caldera_validated=False`), e o
+relatório parece dizer "a emulação não encontrou nada" quando na verdade não
+havia onde executar. Por isso o compose sobe um container `caldera-agent` que
+baixa o sandcat e se registra no grupo `red`.
+
+O que não é óbvio é que **mais de um agente é tão errado quanto nenhum**, e por
+um motivo que só aparece nos números.
+
+### Uma operação roda cada ability em todos os agentes do grupo
+
+O `CalderaClient` cria a operação apontando para um **grupo**
+(`settings.CALDERA_AGENT_GROUP`, `red`), não para um agente. O planner atômico
+então gera um elo por ability **por agente**. Com um agente, 3 abilities são 3
+elos. Com vinte agentes, as mesmas 3 abilities viraram 44 elos executados.
+
+O custo não é só de tempo. Cada elo é uma técnica MITRE ATT&CK sendo executada
+de verdade dentro do sandbox — vinte vezes o que se pediu. E o `success_rate`,
+que é `elos_bem_sucedidos / elos_totais`, passa a ser calculado sobre uma amostra
+que não corresponde a alvo nenhum: ela mede vinte cópias do mesmo container, não
+o ambiente que se queria avaliar. Como é o `success_rate` que alimenta o peso de
+Caldera no score e o `caldera_validated` de cada passo do `attack_path`, o número
+inflado atravessa o pipeline inteiro até o relatório.
+
+### De onde vinham os vinte
+
+Sem a flag `-paw`, o sandcat pede ao servidor um identificador novo a cada boot.
+O serviço `caldera-agent` tem `restart: unless-stopped` — e esse `restart` existe
+por um motivo legítimo: se o Caldera reiniciar, o agente precisa reconectar,
+senão a operação seguinte encontra o grupo vazio. O resultado é que cada reinício
+do container registrava um agente **a mais**, todos vivos aos olhos do servidor,
+todos no grupo `red`. Vinte containers nunca existiram; existiu um container que
+reiniciou vinte vezes.
+
+### A correção: identidade, não faxina
+
+O compose agora passa `-paw ${CALDERA_AGENT_PAW:-aperia-sandbox}`. O servidor
+procura o agente pelo PAW que vem no beacon (`contact_svc.handle_heartbeat` →
+`locate('agents', paw=...)`) e, encontrando, **atualiza** o registro em vez de
+criar outro. Um container, um agente, para sempre.
+
+Isso vale inclusive quando o Caldera é quem reinicia: o store de agentes vive em
+RAM, então o servidor perde a lista e recria o registro no primeiro beacon — com
+o mesmo PAW, continua sendo um só. E o `restart: unless-stopped` fica onde está,
+porque continua sendo ele quem garante a reconexão; o que mudou é que reiniciar
+deixou de ter custo.
+
+### O que não resolve, e por quê
+
+O `untrusted_timer` do Caldera é a resposta errada para esta pergunta, por duas
+razões. Ele não vive em `caldera/local.yml` (o config que montamos), e sim em
+`conf/agents.yml`, que é da imagem. E, mais importante, ele **não apaga nada**:
+depois de N segundos em silêncio o agente é marcado `untrusted`, o que impede
+novos elos, mas o registro fica na lista para sempre. Serve para um agente que
+morreu no meio de uma operação, não para higiene de identidade.
+
+Limpar automaticamente no boot do agente também foi descartado: `DELETE
+/api/v2/agents/{paw}` exige a chave de API do Caldera, e colocá-la dentro do
+container do agente significaria dar credencial de red team justamente ao
+container que existe para ser atacado — o oposto do que o isolamento de rede
+tenta garantir. A limpeza é portanto manual, rodada do host:
+
+```bash
+.venv/bin/python scripts/caldera_limpar_agentes.py --dry-run
+.venv/bin/python scripts/caldera_limpar_agentes.py
+```
+
+O critério é silêncio: um agente vivo faz beacon a cada 30–60s, então quem não é
+visto há cinco minutos não vai voltar — o container que o registrou já não
+existe. Agente sem `last_seen` legível nunca é removido; apagar o agente errado
+custa uma operação sem alvo, e deixar um registro a mais custa nada.
+
+### O sintoma agora é visível
+
+O problema só apareceu porque alguém foi investigar outra coisa: em lugar nenhum
+do sistema o número de agentes do grupo era registrado. `run_operation` agora
+consulta `/api/v2/agents` antes de criar a operação e loga
+`caldera_agentes_do_grupo` com a contagem e os PAWs — `info` quando é um,
+`warning` quando não é. Como todo o resto do cliente, é best-effort: se a
+consulta falhar, loga e segue, porque diagnóstico não pode derrubar o Tier 3.

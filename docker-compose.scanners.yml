@@ -182,6 +182,29 @@ services:
   # há como instalar nada em runtime. O sandcat é binário Go estático, roda
   # direto. `restart: unless-stopped` porque o agente precisa reconectar se o
   # Caldera reiniciar — sem ele, a operação seguinte encontra o grupo vazio.
+  #
+  # ⚠️  UM CONTAINER = UM AGENTE. O `-paw` é obrigatório, não cosmético.
+  #
+  # Sem ele o sandcat pede um PAW novo ao servidor em CADA boot, e como este
+  # serviço reinicia sozinho, cada reinício registrava um agente A MAIS: chegou
+  # a 20 agentes `red` para um único container. O estrago não é estético — uma
+  # operação do Caldera roda cada ability em TODOS os agentes do grupo, então 3
+  # abilities viraram 44 elos: 20× a execução de técnica de ataque real e um
+  # `success_rate` calculado sobre uma amostra que não corresponde a alvo
+  # nenhum. E piorava a cada `restart`.
+  #
+  # `-paw` fixo resolve na raiz: o servidor procura o agente pelo PAW do beacon
+  # (`contact_svc.handle_heartbeat` → `locate('agents', paw=...)`) e, achando,
+  # ATUALIZA o registro em vez de criar outro. Vale também quando o Caldera
+  # reinicia: o store de agentes é em RAM, então ele recria o registro — com o
+  # mesmo PAW, continua sendo um só.
+  #
+  # O `restart: unless-stopped` fica: ele é o que garante a reconexão depois de
+  # um reinício do Caldera. Com o PAW fixo, reiniciar deixou de ter custo.
+  #
+  # Limpeza dos agentes órfãos de antes desta correção (roda no host, não aqui —
+  # este container não tem, e não deve ter, a chave de API do Caldera):
+  #     .venv/bin/python scripts/caldera_limpar_agentes.py --dry-run
   caldera-agent:
     image: alpine:3.20
     container_name: aperia-caldera-agent
@@ -208,9 +231,13 @@ services:
           sleep 3
         done
         chmod +x /tmp/sandcat
-        echo "conectando ao grupo ${CALDERA_AGENT_GROUP:-red}..."
+        echo "conectando ao grupo ${CALDERA_AGENT_GROUP:-red} como ${CALDERA_AGENT_PAW:-aperia-sandbox}..."
+        # `-paw` fixo = identidade estável entre reinícios. Ver o comentário do
+        # serviço acima; o servidor sanitiza o PAW para `[\w.\-]`, então nada
+        # fora desse conjunto sobrevive à viagem.
         exec /tmp/sandcat -server http://caldera:8888 \
-                          -group ${CALDERA_AGENT_GROUP:-red}
+                          -group ${CALDERA_AGENT_GROUP:-red} \
+                          -paw ${CALDERA_AGENT_PAW:-aperia-sandbox}
     networks:
       - aperia_caldera_sandbox
 

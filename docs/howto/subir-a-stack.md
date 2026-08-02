@@ -164,6 +164,26 @@ docker compose -f docker-compose.base.yml \
                up -d --force-recreate zap caldera juice-shop
 ```
 
+### Conferir que o Caldera tem UM agente
+
+O grupo `red` deve ter exatamente um agente — a operação executa cada ability em
+**todos** os agentes do grupo, então um agente órfão multiplica a execução de
+técnicas reais e falseia o `success_rate`:
+
+```bash
+curl -s -H "KEY: aperia-dev-caldera-red" http://localhost:8888/api/v2/agents \
+  | python3 -c 'import sys,json; a=json.load(sys.stdin); print(len(a), [x["paw"] for x in a])'
+```
+
+Se vier mais de um (registros antigos, de antes do `-paw` fixo no compose):
+
+```bash
+.venv/bin/python scripts/caldera_limpar_agentes.py --dry-run   # confere
+.venv/bin/python scripts/caldera_limpar_agentes.py             # remove
+```
+
+O porquê está na [explicação §14](../explicacao-pipeline.md#14-por-que-o-caldera-tem-um-agente-e-não-vinte).
+
 > ⚠️ **Gotcha do Caldera:** o `docker-compose.scanners.yml` declara a rede
 > `aperia_caldera_sandbox` com `internal: true`. **Nunca remova essa flag** —
 > ela impede que técnicas MITRE ATT&CK reais executadas pelo Caldera escapem

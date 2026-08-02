@@ -33,6 +33,8 @@ ser grande, é o ZAP não estar respeitando o próprio limite.
 """
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import time
 from typing import Any
 
@@ -87,6 +89,29 @@ class ZAPUnavailableError(ScannerUnavailableError):
 class ZAPScanTimeoutError(AperiaError):
     """O ZAP está vivo, mas a fase não chegou a 100% dentro do teto do cliente."""
 
+
+
+def _caminho_da_url(url: str) -> str:
+    """Caminho + query da URL do alerta, sem esquema nem host.
+
+    O host é sempre o alvo do scan: repeti-lo em cada linha é ruído. A query
+    entra porque o ZAP reporta alertas distintos para parâmetros distintos
+    (`/search?q=` é outra superfície que `/search`).
+    """
+    if not url:
+        return ""
+    partes = urlsplit(url)
+    caminho = partes.path or "/"
+    if partes.query:
+        caminho = f"{caminho}?{partes.query}"
+    return caminho[:500]
+
+
+def _nome_do_repo(repo_url: str) -> str:
+    """`https://github.com/org/repo` → `repo`, igual aos outros scanners."""
+    if not repo_url:
+        return ""
+    return (repo_url.rstrip("/").rsplit("/", 1)[-1] or "").removesuffix(".git")[:255]
 
 class ZAPScanner(BaseScanner):
     # Pior caso das duas fases somadas, já com folga. Informativo: o controle
@@ -392,7 +417,25 @@ class ZAPScanner(BaseScanner):
         commit_sha: str,
         repo_url: str,
     ) -> Finding:
+        """Converte um alerta do ZAP em `Finding`.
+
+        **A rota vai em `file_path`, e isso é o que faz o dedup funcionar.**
+        O `dedup_key` é `source:titulo:file_path:line_number:commit`. Enquanto a
+        URL ficava só em `asset`, todo alerta do mesmo tipo colapsava num único
+        finding: **369 alertas viraram 8**. Os 8 tipos estavam certos, mas com
+        `file_path` vazio — o usuário sabia *que* faltava CSP, não *em quais
+        rotas*, que é justamente o que torna um achado de DAST acionável.
+
+        Guardamos o **caminho**, não a URL inteira: o host é sempre o
+        `target_url` e só repetiria em todas as linhas. O caminho é o que
+        distingue, e é o que a tela mostra na coluna de arquivo.
+
+        `asset` passa a ser o repositório, como nos demais scanners — antes
+        recebia a URL, e a UI acabava exibindo um endereço onde mostra o nome do
+        projeto.
+        """
         risk = alert.get("risk", "Low")
+        url = str(alert.get("url", ""))
         return Finding(
             source="zap",
             severity=_RISK_MAP.get(risk, Severity.LOW),
@@ -400,7 +443,8 @@ class ZAPScanner(BaseScanner):
             description=str(alert.get("description", ""))[:2000],
             commit_sha=commit_sha,
             repo_url=repo_url,
-            asset=str(alert.get("url", ""))[:500],
+            asset=_nome_do_repo(repo_url),
+            file_path=_caminho_da_url(url) or None,
             cwe_id=str(alert.get("cweid")) if alert.get("cweid") else None,
             raw_output=alert,
             tier=3,

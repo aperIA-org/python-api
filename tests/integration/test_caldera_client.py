@@ -443,3 +443,65 @@ class TestExecutavelNoSandbox:
         """Facts que o agente ou o próprio Caldera fornecem seguem valendo."""
         catalogo = [self._ability("local", "T1082", command)]
         assert self._mapear(catalogo, ["T1082"]) == ["local"]
+
+
+class TestContagemDeAgentesDoGrupo:
+    """A operação roda cada ability em TODOS os agentes do grupo.
+
+    O serviço `caldera-agent` reiniciava e registrava um agente NOVO a cada vez
+    (PAW aleatório): chegou a 20 agentes `red` para um único container, o que
+    transformou 3 abilities em 44 elos — 20× a execução de técnica MITRE real e
+    um `success_rate` calculado sobre uma amostra que não corresponde a alvo
+    nenhum. O `-paw` fixo no compose resolve a causa; este log é o que torna a
+    recaída VISÍVEL, porque o número não aparecia em lugar algum.
+    """
+
+    @respx.mock
+    def test_run_operation_consulta_agentes_antes_de_criar(self):
+        agentes = respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(
+                200, json=[{"paw": "aperia-sandbox", "group": "red", "trusted": True}]
+            )
+        )
+        respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-1"})
+        )
+
+        assert _build_client().run_operation("adv-1") == "op-1"
+        assert agentes.called
+
+    @respx.mock
+    def test_conta_apenas_o_grupo_configurado(self, monkeypatch):
+        monkeypatch.setattr(settings, "CALDERA_AGENT_GROUP", "red")
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"paw": "a", "group": "red", "trusted": True},
+                    {"paw": "b", "group": "red", "trusted": False},
+                    {"paw": "c", "group": "blue", "trusted": True},
+                ],
+            )
+        )
+        assert _build_client()._registrar_agentes_do_grupo("red") == 2
+
+    @respx.mock
+    def test_falha_na_contagem_nao_impede_a_operacao(self):
+        """Diagnóstico é best-effort — nunca pode derrubar o Tier 3."""
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            side_effect=httpx.ConnectError("Connection refused")
+        )
+        respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-2"})
+        )
+
+        cliente = _build_client()
+        assert cliente._registrar_agentes_do_grupo("red") is None
+        assert cliente.run_operation("adv-1") == "op-2"
+
+    @respx.mock
+    def test_resposta_malformada_nao_estoura(self):
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(200, json=["lixo", {"group": "red"}, None])
+        )
+        assert _build_client()._registrar_agentes_do_grupo("red") == 1

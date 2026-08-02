@@ -18,7 +18,7 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 | `POST` | `/auth/logout` | Invalida o `refresh_token` fornecido. Sempre `204` (evita oracle). | — |
 | `GET` | `/findings` | Lista findings do usuário logado (filtros `commit_sha`/`severity`/`tier`/`source`/`secret_verified` + paginação). Omite `raw_output`. | JWT |
 | `GET` | `/findings/{finding_id}` | Detalhe de um finding, incluindo `raw_output`. 404 se não pertencer ao usuário. | JWT |
-| `GET` | `/scans` | Lista scans do usuário logado, paginados (mais recentes primeiro). | JWT |
+| `GET` | `/scans` | Lista scans do usuário logado, paginados. Ordenado por **`COALESCE(tier1_started_at, created_at)` desc** — ou seja, pela execução mais recente, não pela entrada do commit: reescanear um commit antigo preserva o `created_at` e o job ficaria no fim da lista. | JWT |
 | `GET` | `/scans/{commit_sha}` | Status de um scan por `commit_sha`, com `findings_summary`. | JWT |
 | `GET` | `/scans/{commit_sha}/report` | Relatórios (um por tier) de um commit. Lista vazia se o pipeline ainda não gerou nenhum. | JWT |
 | `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório de um tier específico (1-3) de um commit. | JWT |
@@ -73,6 +73,7 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `CALDERA_SANDBOX_MODE` | `True` | **Inviolável** — `false` levanta `SandboxViolationError` no `__init__` do `CalderaClient`. |
 | `CALDERA_POLL_INTERVAL` | `10` | Intervalo (s) de polling de status da emulação; testes injetam `0` via construtor. |
 | `CALDERA_AGENT_GROUP` | `"red"` | Grupo de agentes usado na emulação Caldera. |
+| `CALDERA_AGENT_PAW` | `aperia-sandbox` | **Só no compose** (a API não lê): PAW fixo do agente sandcat. Sem ele, cada reinício do container registra um agente novo, e a operação roda cada ability em todos eles. Ver [explicação §14](explicacao-pipeline.md#14-por-que-o-caldera-tem-um-agente-e-não-vinte). |
 | `LLM_GUARD_ENABLED` | `True` | Bloqueio de padrões de prompt injection antes de chamar a API do Claude. |
 | `FINDINGS_PERSISTENCE_ENABLED` | `True` | Escrita best-effort de `Finding` na tabela `findings` pelos scan workers; testes desligam. |
 | `SCAN_PERSISTENCE_ENABLED` | `True` | Escrita best-effort do ciclo de vida do `ScanJob` (criação + updates de status por tier); testes desligam. Também controla a varredura de jobs travados no boot da API. |

@@ -29,7 +29,7 @@ def _fallback_markdown(analysis: dict[str, Any]) -> str:
     findings = analysis.get("findings", [])
     reason = analysis.get("reason", "unknown")
     lines = [
-        "## ⚠️ aperIA — Análise em modo degradado",
+        "## aperIA — Análise em modo degradado",
         "",
         f"Não foi possível gerar a narrativa Claude (motivo: `{reason}`). "
         "Lista bruta de findings:",
@@ -150,14 +150,15 @@ REGRAS:
 4. Para CADA passo do attack_path, mostre fase + TTP MITRE + descrição + se foi validado pelo Caldera.
 5. Liste as prioritized_actions em ordem (1, 2, 3...).
 6. Tom: técnico, direto, acionável; máximo 40 linhas de markdown.
+7. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
 
 Formato:
-## 🛡️ aperIA — Análise Profunda (Tier 3)
+## aperIA — Análise Profunda (Tier 3)
 
 **Risk Score (ajustado):** <score>/100 (<level>) — kill chain <completa|incompleta>
 
 **Attack path:**
-1. [<phase>] [<TTP>] <descrição> · <validado por Caldera? ✓|—>
+1. [<phase>] [<TTP>] <descrição> · validado por Caldera: <sim|nao>
 2. ...
 
 **Ações priorizadas:**
@@ -172,7 +173,7 @@ Formato:
 def _fallback_t3_markdown(analysis: dict[str, Any]) -> str:
     reason = analysis.get("reason", "unknown")
     lines = [
-        "## ⚠️ aperIA — Análise Profunda em modo degradado",
+        "## aperIA — Análise Profunda em modo degradado",
         "",
         f"Não foi possível gerar a narrativa Tier 3 (motivo: `{reason}`).",
         "",

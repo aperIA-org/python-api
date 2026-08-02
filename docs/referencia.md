@@ -59,7 +59,13 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `CLAUDE_MODEL_FORMATTING` | `claude-haiku-4-5-20251001` | Modelo usado nos workers de `reporting` (markdown). |
 | `CLAUDE_PROMPT_CACHE_ENABLED` | `True` | Ativa `cache_control: ephemeral` no bloco `system` dos prompts. |
 | `ZAP_BASE_URL` | `http://zap:8090` | Endpoint do OWASP ZAP (Tier 3 DAST). |
-| `ZAP_API_KEY` | `""` | Autenticação no ZAP. |
+| `ZAP_API_KEY` | `changeme` | Autenticação no ZAP. O default é igual ao de `docker-compose.scanners.yml` de propósito — divergir faz o ZAP recusar toda chamada. |
+| `ZAP_SPIDER_MAX_DURATION_MIN` | `3` | Teto de duração do spider, aplicado **no ZAP**. `0` = sem limite. |
+| `ZAP_SPIDER_MAX_CHILDREN` | `10` | Filhos por nó que o crawler expande; corta listagem/paginação. `0` = sem limite. |
+| `ZAP_ASCAN_MAX_DURATION_MIN` | `10` | Teto do active scan, aplicado **no ZAP** para que ele encerre sozinho e os alertas parciais sejam coletados. |
+| `ZAP_ASCAN_MAX_RULE_DURATION_MIN` | `2` | Teto por regra; impede que uma regra cara consuma o orçamento inteiro. |
+| `ZAP_ASCAN_THREADS_PER_HOST` | `2` | Concorrência de ataque por host. |
+| `ZAP_ASCAN_DISABLED_RULES` | `40026` | Ids de regras desligadas. `40026` é o DOM XSS, que sobe Firefox headless dentro do container do ZAP. Vazio = política completa. |
 | `OPENCTI_URL` | `http://opencti:8081` | Endpoint do OpenCTI (Tier 3 threat intel). |
 | `OPENCTI_TOKEN` | `""` | Autenticação no OpenCTI. |
 | `CALDERA_URL` | `http://caldera:8888` | Endpoint do MITRE Caldera (Tier 3 emulação adversária). |

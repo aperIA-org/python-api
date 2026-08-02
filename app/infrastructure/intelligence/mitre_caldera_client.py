@@ -23,6 +23,8 @@ testes injetam ``poll_interval=0`` no construtor.
 """
 from __future__ import annotations
 
+import re
+
 import time
 from typing import Any
 
@@ -33,6 +35,18 @@ from app.config import settings
 from app.core.exceptions import SandboxViolationError
 
 logger = structlog.get_logger()
+
+
+# Facts cujo namespace é de serviço externo: exigem credencial que o sandbox
+# isolado não tem (e não deve ter). Denylist e não allowlist de propósito — uma
+# ability nova de enumeração local deve continuar entrando sem precisar de
+# cadastro; uma nova de exfiltração para provedor X será notada quando aparecer.
+_NAMESPACES_EXTERNOS = frozenset(
+    {"dropbox", "github", "aws", "s3", "azure", "gcp", "slack", "twitter", "smtp", "ftp"}
+)
+
+# Marcas de credencial em qualquer namespace.
+_MARCAS_DE_CREDENCIAL = ("api.key", "access.token", "secret", "password", "passwd")
 
 
 class CalderaClient:
@@ -207,6 +221,7 @@ class CalderaClient:
             return []
 
         abilities: list[str] = []
+        descartadas: list[str] = []
         for ability in catalogo:
             if not isinstance(ability, dict):
                 continue
@@ -216,16 +231,61 @@ class CalderaClient:
             if not self._tem_executor_linux(ability):
                 continue
             ability_id = ability.get("ability_id") or ability.get("id")
-            if ability_id and ability_id not in abilities:
-                abilities.append(ability_id)
+            if not ability_id or ability_id in abilities:
+                continue
+            if not self._executavel_no_sandbox(ability):
+                descartadas.append(ability.get("name") or ability_id)
+                continue
+            abilities.append(ability_id)
 
+        # `descartadas` é o que distingue "a técnica não existe no catálogo" de
+        # "existe, mas não roda aqui" — sem esse número o relatório dizia apenas
+        # `caldera_validated: false`, sem dizer o motivo.
         logger.info(
             "caldera_abilities_mapeadas",
             tecnicas=len(pedidas),
             abilities=len(abilities),
+            descartadas=len(descartadas),
+            exemplos_descartados=descartadas[:3],
             catalogo=len(catalogo),
         )
         return abilities
+
+    @staticmethod
+    def _facts_exigidos(ability: dict[str, Any]) -> set[str]:
+        """Facts que os executores linux da ability referenciam (`#{fato}`)."""
+        facts: set[str] = set()
+        for executor in ability.get("executors", []) or []:
+            if str(executor.get("platform", "")).lower() != "linux":
+                continue
+            facts.update(re.findall(r"#\{([a-zA-Z0-9._]+)\}", executor.get("command", "") or ""))
+        return facts
+
+    @classmethod
+    def _executavel_no_sandbox(cls, ability: dict[str, Any]) -> bool:
+        """`False` se a ability depende de credencial de serviço externo.
+
+        O sandbox do Caldera é `internal: true` — sem rota para a internet, por
+        desenho: é o único mecanismo que impede movimento lateral de teste
+        alcançar sistema real. Abilities de exfiltração para Dropbox, GitHub ou
+        S3 exigem `dropbox.api.key`, `github.access.token` e afins, que nós não
+        temos nem devemos fornecer.
+
+        Sem elas satisfeitas o planner atômico não gera elo NENHUM e encerra a
+        operação na hora — foi o que aconteceu: 6 abilities mapeadas, 0
+        executadas, e o relatório dizendo apenas `caldera_validated: false` sem
+        explicar por quê.
+
+        Descartar aqui é melhor que deixar o planner descartar: evita criar um
+        adversário que provadamente não roda, e permite dizer no log o motivo.
+        """
+        for fact in cls._facts_exigidos(ability):
+            namespace = fact.split(".", 1)[0].lower()
+            if namespace in _NAMESPACES_EXTERNOS:
+                return False
+            if any(marca in fact.lower() for marca in _MARCAS_DE_CREDENCIAL):
+                return False
+        return True
 
     @staticmethod
     def _casa_tecnica(technique_id: str, pedidas: set[str]) -> bool:

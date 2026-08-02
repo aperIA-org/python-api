@@ -774,3 +774,172 @@ O log registra **qual** critério disparou (`criterio=severidade_individual` /
 `risco_agregado` / `severidade_e_risco`), porque a investigação que se segue é
 diferente: severidade aponta para um finding específico, risco agregado aponta
 para o conjunto.
+
+## 13. Por que o Tier 3 custa caro, e de onde vieram os tetos
+
+O Tier 1 lê texto. O Tier 2 lê árvores de sintaxe. O Tier 3 é o único que
+**faz requisições**: o ZAP percorre a aplicação publicada e dispara payloads
+reais contra cada parâmetro que encontra. É a diferença entre "esse padrão de
+código costuma ser vulnerável" e "eu explorei isso agora"; e é também a razão
+de o custo mudar de natureza. Nos dois primeiros tiers o custo é função do
+**diff**. No Tier 3 é função da **aplicação inteira**, e cresce como
+`rotas × parâmetros × regras de ataque` — um número que nada no PR limita.
+
+Contra o alvo de teste da stack (OWASP Juice Shop, centenas de rotas) isso
+significa que um active scan sem teto simplesmente não termina em tempo de
+pipeline. Duas falhas distintas apareceram, e vale separar porque os consertos
+são diferentes.
+
+### O container morria: a JVM não enxergava o próprio limite
+
+`aperia-zap` terminava com `Exited (137)` — SIGKILL do kernel, o `mem_limit:
+2g` do cgroup sendo aplicado. O sintoma que chegava ao worker era outro:
+
+```
+scanner_skipped error='[Errno -5] No address associated with hostname' scanner=ZAPScanner
+```
+
+que parece problema de DNS e não é. O container já tinha morrido; o nome `zap`
+deixou de resolver porque não havia mais container para resolver.
+
+A causa está no `zap.sh`, não no ZAP. O script tenta dimensionar o heap pelo
+limite do cgroup, mas lê `/sys/fs/cgroup/memory/memory.stat` — caminho de
+**cgroup v1**. Docker no WSL2 usa **cgroup v2**, onde esse arquivo não existe.
+O script cai no fallback e usa o `MemTotal` do host:
+
+```
+Available memory: 7942 MB   →  -Xmx1985m   dentro de um limite de 2048 MB
+```
+
+Heap de 1985 MB num teto de 2048 MB deixa 63 MB para metaspace, code cache,
+stacks de thread e buffers diretos — tudo que a JVM aloca **fora** do heap. Não
+há coleta de lixo que resolva: o processo cresce até ser morto. O detalhe que
+fecha o diagnóstico é que a JVM 17 sozinha acerta (`MaxHeapSize` ergonômico dá
+512 MB dentro do limite de 2 GB, porque `UseContainerSupport` lê cgroup v2
+corretamente) — quem estraga é o `-Xmx` que o script calcula e passa por cima
+da ergonomia.
+
+Por isso o conserto **não** foi subir o teto. Subir o teto só move a parede:
+com 4 GB o script pediria `-Xmx3971m` e o container morreria em 4 GB. O
+conserto é informar o valor certo, e `zap.sh` aceita: ele varre os argumentos
+procurando `-Xmx*` e, achando, adota o do usuário. Daí a linha em
+`docker-compose.scanners.yml`.
+
+**O número: `-Xmx1g` com `mem_limit: 2g` — heap em 50% do limite.** A regra é
+essa proporção, não o valor absoluto: a JVM precisa de espaço comparável ao do
+próprio heap para metaspace, code cache, buffers diretos e as ~120 threads que
+o daemon mantém. Medido durante o scan do Juice Shop, o processo Java estabiliza
+em torno de **600 MB de RSS** com esse heap — folga confortável. Se algum dia o
+heap precisar subir, `ZAP_MEM_LIMIT` sobe junto e na mesma proporção; as duas
+variáveis existem no `.env.example` lado a lado por isso.
+
+### O que a JVM não explicava: o ZAP sobe navegadores
+
+Com o heap corrigido, o container parou de morrer — mas ainda encostava no teto:
+pico de **1.94 GiB de 2 GiB**, 3794 eventos de reclaim no cgroup e 256 MB
+empurrados para swap. E o processo Java, medido no mesmo instante, usava só
+594 MB. A conta não fechava porque a memória não era dele:
+
+```
+  PID   RSS    COMMAND
+    1   594 MB java -Xmx1g -jar /zap/zap-2.16.1.jar -daemon …
+  555   462 MB firefox-esr --marionette -headless …
+  554   325 MB firefox-esr --marionette -headless …
+  972   247 MB firefox-esr -contentproc …
+```
+
+A regra de active scan **DOM XSS** (id `40026`) avalia DOM executando a página,
+e para isso sobe **Firefox headless de verdade** — dentro do mesmo container e
+do mesmo cgroup do ZAP. Os navegadores custavam mais que o scanner inteiro.
+Nenhum ajuste de `-Xmx` conserta isso: essa memória não passa pelo heap, nem
+pelo processo Java. O `mem_limit` também não ajuda a diagnosticar — o container
+é morto sem que nada no log do ZAP indique navegador algum.
+
+Por isso `40026` entra desligada por padrão (`ZAP_ASCAN_DISABLED_RULES`), e o
+motivo está na variável e não no código: quem tiver folga de RAM reabilita
+apagando o id. É a regra mais cara da política por uma ordem de grandeza, e é
+a única cujo custo não é de CPU nem de rede, mas de processo externo.
+
+### O scan não terminava: quem precisa de teto é o ZAP, não o cliente
+
+A outra execução mostrou o ZAP vivo, dezenas de polls bem-sucedidos por vários
+minutos, e no fim `scanner_skipped error='timed out'`. Duas coisas erradas ao
+mesmo tempo.
+
+A primeira é contabilidade: `_poll_status` somava `poll_interval` a cada volta
+e ignorava quanto tempo a própria requisição levou. Com o ZAP ocupado, um poll
+de 30 s contava como 10 s — o teto declarado de 600 s valia muito mais que isso
+na prática. Agora o tempo é medido no relógio monotônico, e existe um segundo
+teto por **número de polls** (que é o que fecha o laço em teste, onde
+`poll_interval=0` congela o relógio de parede).
+
+A segunda é mais importante e é de desenho. Esperar mais **não resolve**: se o
+cliente desiste, o scan é abandonado no meio e os alertas que o ZAP já havia
+encontrado vão embora junto. Trocar 10 minutos por 40 apenas adia o mesmo zero.
+
+O teto, então, foi para dentro do ZAP:
+
+| Opção | Valor | O que corta |
+|---|---|---|
+| `spider maxDuration` | 3 min | tempo total de crawl |
+| `spider maxChildren` | 10 | filhos por nó — listagem/paginação, que é a mesma rota repetida |
+| `ascan maxScanDurationInMins` | 10 min | tempo total do active scan |
+| `ascan maxRuleDurationInMins` | 2 min | uma regra cara (SQLi time-based) monopolizando o orçamento |
+| `ascan threadPerHost` | 2 | concorrência — cada thread segura mensagens em memória |
+| `ascan disableScanners` | `40026` | a regra de DOM XSS, que sobe Firefox headless (ver acima) |
+
+Com isso o ZAP **encerra sozinho**, a fase chega a 100%, e `collect_alerts`
+recolhe o que deu tempo de achar. Os tetos do cliente ficam deliberadamente
+**acima** dos do ZAP (teto do ZAP + 2 min de folga): se o cliente estourar
+primeiro, o diagnóstico não é "o alvo é grande", é "o ZAP não está respeitando
+o próprio limite" — que é um defeito diferente e merece log diferente.
+
+**O trade-off, dito por extenso:** escolhemos cobertura parcial em tempo
+previsível, não cobertura total em tempo indeterminado. O Tier 3 roda depois do
+Gate 2, num PR que já tem `high`/`critical` — quem está esperando esse
+resultado precisa dele em minutos, e um DAST que devolve as vulnerabilidades
+das primeiras dez rotas é infinitamente mais útil que um que devolve `[]` por
+timeout. O `maxChildren=10` é a parte mais agressiva do corte e é a que dá o
+melhor retorno: numa loja de exemplo, enumerar 200 produtos não descobre
+superfície nova, é a mesma rota com id diferente. Quem tem alvo pequeno e quer
+cobertura maior sobe os números no `.env` — todos são configuráveis, e `0`
+desliga o teto correspondente (semântica do próprio ZAP).
+
+### O que a medição mostrou
+
+Duas execuções do `ZAPScanner` contra `http://juice-shop:3000`, com todo o resto
+igual — a única diferença é a regra 40026:
+
+| | DOM XSS ligado | DOM XSS desligado |
+|---|---|---|
+| Duração total | 300 s | **135 s** |
+| Alertas | 66 | 62 |
+| Pico de memória (cgroup) | 2.00 GiB — o teto | **1.06 GiB** |
+| Eventos de reclaim | 3794 | **0** |
+| Swap | 256 MB | 0 |
+
+Quatro alertas de 66 (6%) custavam mais que o dobro do tempo e todo o orçamento
+de memória — com o container operando encostado no limite, que é onde ele
+morria antes do `-Xmx`. É a troca mais barata da lista, e a única em que
+"reduzir escopo" não é escolha de gosto: sem ela, nenhum valor de `mem_limit`
+que caiba nesta máquina sobrevive.
+
+### As três falhas agora se distinguem no log
+
+Era tudo `scanner_skipped` com a mensagem da biblioteca que estourou, e a
+mensagem descreve o sintoma. Foi assim que "o container morreu por OOM" virou
+um diagnóstico de DNS. Agora:
+
+| Situação | Como aparece |
+|---|---|
+| O ZAP não está lá (morto, OOM, fora do ar) | `ZAPUnavailableError` — e o handshake em `/JSON/core/view/version/` a detecta **antes** de qualquer trabalho |
+| O ZAP morreu no meio | `ZAPUnavailableError` depois de 3 polls seguidos falhando por erro de transporte |
+| O scan não coube no teto | `ZAPScanTimeoutError`, com a fase e o **percentual em que parou** |
+| Terminou e não achou nada | `zap_alerts_collected alerts_count=0` — sucesso, não falha |
+
+`scanner_skipped` passou a registrar `error_type` além de `error`, para todos os
+scanners: o tipo da exceção é o que separa "a ferramenta não está lá" de "não
+terminou no tempo", e é a primeira coisa que se quer saber. Um blip isolado de
+rede também deixou de custar o scan inteiro — um `ReadTimeout` num poll (cuja
+mensagem é literalmente `timed out`) é tolerado até três vezes seguidas antes
+de declararmos o daemon morto.

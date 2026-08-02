@@ -46,9 +46,39 @@ services:
     profiles: [dast]
     # A varredura ativa é o pico de consumo da stack. O teto evita que ela
     # sozinha leve o WSL2 junto — prefira o scan falhar a máquina travar.
-    mem_limit: 2g
+    mem_limit: ${ZAP_MEM_LIMIT:-2g}
     command:
+      # ⚠️  `-Xmx` PRECISA vir aqui, e precisa ser ~metade do `mem_limit`.
+      #
+      # Sem ele o container morria com `Exited (137)` (SIGKILL do cgroup) toda
+      # vez que o active scan aquecia. A causa não é o ZAP ser guloso: é o
+      # `zap.sh` dimensionar o heap pela memória ERRADA. Ele tenta ler o limite
+      # do cgroup em `/sys/fs/cgroup/memory/memory.stat` — caminho de **cgroup
+      # v1**. Docker no WSL2 (e qualquer host moderno) usa **cgroup v2**, onde
+      # esse arquivo não existe; o script cai no fallback `MemTotal` do
+      # /proc/meminfo, vê os 7.9 GB do HOST e resolve usar 1/4 disso:
+      #
+      #     Available memory: 7942 MB  →  -Xmx1985m   dentro de um limite de 2048m
+      #
+      # Heap de 1985m com teto de 2048m deixa 63 MB para metaspace, code cache,
+      # stacks de thread e buffers diretos. A JVM não tem como fazer GC para
+      # caber: ela cresce até o kernel matar. (A própria JVM 17 lê cgroup v2
+      # certo — `MaxHeapSize` ergonômico dá 512m aqui —, mas o `-Xmx` do script
+      # sobrescreve a ergonomia.)
+      #
+      # `zap.sh` varre os argumentos procurando `-Xmx*`: encontrando, adota o
+      # valor do usuário e NÃO repassa o argumento ao jar. Daí ele vir antes de
+      # `-daemon`. Confirme no boot com:
+      #     docker logs aperia-zap | grep "Using JVM args"
+      #
+      # 1g = 50% do `mem_limit`, e a PROPORÇÃO é o que importa: a JVM precisa
+      # de espaço comparável ao heap fora dele (metaspace, code cache, buffers
+      # diretos, ~120 threads). Medido num scan do Juice Shop com o DOM XSS
+      # desligado (ver ZAP_ASCAN_DISABLED_RULES): pico de 1.05 GiB no cgroup,
+      # zero eventos de reclaim. Se subir o heap, suba `ZAP_MEM_LIMIT` na mesma
+      # proporção — os dois andam juntos.
       - zap.sh
+      - -Xmx${ZAP_JVM_HEAP:-1g}
       - -daemon
       - -host
       - 0.0.0.0
@@ -60,6 +90,18 @@ services:
       - api.addrs.addr.regex=true
       - -config
       - api.key=${ZAP_API_KEY:-changeme}
+    # A imagem traz um healthcheck que bate em `$ZAP_PORT`, e essa variável vem
+    # assada como 8080 — mas o daemon aqui sobe na 8090. O container ficava
+    # eternamente `unhealthy` servindo normalmente, o que é pior que não ter
+    # healthcheck: esconde o dia em que ele estiver de fato quebrado.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --silent --fail --output /dev/null http://localhost:8090/ || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     ports:
       - "8090:8090"
     networks:

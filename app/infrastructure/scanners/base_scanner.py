@@ -32,6 +32,12 @@ class BaseScanner(ABC):
             logger.warning(
                 "scanner_skipped",
                 scanner=name,
+                # `error` sozinho é a mensagem da biblioteca que estourou, e ela
+                # descreve o sintoma, não a causa: um ZAP morto por OOM chega
+                # aqui como "No address associated with hostname", que parece
+                # DNS. O tipo da exceção é o que separa "a ferramenta não está
+                # lá" de "não terminou no tempo".
+                error_type=type(e).__name__,
                 error=str(e),
                 commit_sha=kwargs.get("commit_sha", ""),
             )

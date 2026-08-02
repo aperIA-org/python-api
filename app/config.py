@@ -44,6 +44,35 @@ class Settings(BaseSettings):
     # "Server disconnected", que parece servidor fora do ar, não credencial
     # errada. Uma variável faltando, dois fallbacks discordantes.
     ZAP_API_KEY: str = "changeme"
+    # Tetos do scan de DAST, aplicados NO ZAP (não só no cliente). Contra uma
+    # aplicação grande o active scan não converge em tempo de pipeline; com o
+    # teto no lado do ZAP ele encerra sozinho, a fase chega a 100% e coletamos
+    # os alertas parciais em vez de abandonar o scan e voltar de mãos vazias.
+    # Ver docs/explicacao-pipeline.md §13 para a escolha dos números.
+    ZAP_SPIDER_MAX_DURATION_MIN: int = 3
+    # Filhos por nó que o crawler expande. Corta listagem grande (catálogo,
+    # paginação), que é a mesma rota repetida e não agrega superfície nova.
+    ZAP_SPIDER_MAX_CHILDREN: int = 10
+    ZAP_ASCAN_MAX_DURATION_MIN: int = 10
+    # Teto por REGRA: impede que uma única regra cara (ex: SQLi time-based)
+    # consuma o orçamento inteiro e deixe as outras sem rodar.
+    ZAP_ASCAN_MAX_RULE_DURATION_MIN: int = 2
+    # Threads de ataque por host. O default do ZAP escala com os núcleos e é o
+    # que mais infla o heap (cada thread mantém mensagens em memória). 2 é o
+    # que cabe no teto de heap do container.
+    ZAP_ASCAN_THREADS_PER_HOST: int = 2
+    # Regras de active scan desligadas, por id, separadas por vírgula. Vazio =
+    # política completa.
+    #
+    # 40026 é o **DOM XSS**, e ele é caso à parte: para avaliar DOM ele sobe
+    # **Firefox headless de verdade**, dentro do mesmo container e do mesmo
+    # cgroup do ZAP. Medido durante um scan do Juice Shop: dois processos pais
+    # de Firefox (462 MB + 325 MB) mais os content processes, contra 594 MB do
+    # JVM inteiro — o navegador custava mais que o scanner. Com heap correto o
+    # container ainda batia no teto de 2 GB e começava a usar swap por causa
+    # dele. Nenhum ajuste de `-Xmx` conserta isso: a memória não é do heap, nem
+    # do processo Java.
+    ZAP_ASCAN_DISABLED_RULES: str = "40026"
 
     # ---- Threat Intel (OpenCTI) ----
     OPENCTI_URL: str = "http://opencti:8081"

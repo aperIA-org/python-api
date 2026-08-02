@@ -1,6 +1,6 @@
 # Pendências e próximos passos
 
-Estado em **2026-08-01**. Cobre os dois repositórios (`python-api` e
+Estado em **2026-08-02**. Cobre os dois repositórios (`python-api` e
 `front-aperIA`) porque as pendências atravessam os dois.
 
 Ordenado por **o que destrava mais coisa**, não por esforço. Cada item traz a
@@ -126,39 +126,141 @@ Enquanto não se decide, o container está parado.
 
 ---
 
-## 4. Caldera — validado em execução, com duas ressalvas
+## 4. Caldera — encanamento resolvido; cobertura do catálogo é decisão de produto
 
-Quatro bloqueios resolvidos: crash no boot (assets do `magma`), chave de API
-aleatória por imagem, nomes de campo errados no cliente
+Quatro bloqueios de infraestrutura foram resolvidos: crash no boot (assets do
+`magma`), chave de API aleatória por imagem, nomes de campo errados no cliente
 (**`adversary_id` no adversário, `id` na operação** — ler `id` no adversário
 levantava `KeyError` logo após um POST 200, e o `run_safe` traduzia para
-"Caldera unavailable"), e a ausência de técnicas.
+"Caldera unavailable"), e a ausência de técnicas (elas vinham só do
+enriquecimento CTI, que depende do OpenCTI (§3) e de haver CVE nos findings;
+agora a fonte primária é o `event_chain` do Tier 2).
 
-Sobre as técnicas: elas vinham **só do enriquecimento CTI**, que depende do
-OpenCTI (§3) e de haver CVE nos findings. Secrets e regras do Semgrep não têm
-CVE, então a lista era sempre vazia. Agora a fonte primária é o `event_chain`
-do Tier 2 — que já mapeia MITRE ATT&CK e é literalmente a correlação que o
-produto promete.
+**Ressalva 2 (acúmulo de agentes) — resolvida, mas o diagnóstico estava
+incompleto.** O `-paw` fixo (`CALDERA_AGENT_PAW`, default `aperia-sandbox`) dá
+identidade estável entre reinícios, e isso resolve o caso do container
+reiniciando. **Não era a única fonte.**
 
-Provado em execução: `caldera_status=ok`, agente registrado
-(`grupo=red platform=linux`), e uma operação com 44 elos executados.
+Em 2026-08-02, exercitando o fallback recém-implementado, os 20 agentes
+voltaram em 10 minutos — com o container do agente intocado. A causa real: a
+ability **"Start 54ndc47"** (`T1059.004`), cujo comando é
+`nohup ./sandcat.go -server ... &`, ou seja, **inicia outro agente do Caldera**.
+Como uma operação executa cada ability em *todos* os agentes do grupo, cada
+execução criava um agente que entrava no grupo e recebia a mesma ability. 43
+elos, operação nunca finaliza, timeout de 600s.
 
-**Ressalva 1 — cobertura do catálogo.** Numa execução as 6 técnicas do Tier 2
-mapearam para **zero** abilities (`descartadas=0`, ou seja, nem chegaram ao
-filtro): simplesmente não existem no catálogo de 162. Noutra, as 6 abilities
-encontradas eram todas de exfiltração para Dropbox/GitHub/S3, que exigem
-credencial externa e não rodam no sandbox `internal: true` — corretamente
-descartadas agora, com o motivo no log.
+Ela estava latente desde sempre no catálogo — nada mapeava para `T1059` até o
+fallback de pai passar a mapear.
 
-Como a análise do Tier 2 não é determinística, **a emulação varia entre scans
-do mesmo commit**. Vale calibrar expectativa: `caldera_validated: true` é
-possível, não garantido.
+**Corrigido:** `_implanta_agente` descarta abilities cujo comando ou payload
+referencia o binário do agente (`sandcat` / `54ndc47`), e roda **antes** do
+filtro de credencial porque é este que causa laço. São **5 de 70** abilities
+linux do catálogo, todas de implantação — inclusive `Weak executable files`,
+que parece inofensiva e injeta um lançador do sandcat em todo executável
+gravável que encontra.
 
-**Ressalva 2 — agentes acumulando.** Há **20 agentes** registrados, todos
-`trusted`. Cada reinício do container cria um novo, por causa do
-`restart: unless-stopped`. Não quebra nada, mas infla as operações (3 abilities
-viraram 44 elos) e piora com o tempo. Vale o agente reusar identidade entre
-reinícios, ou uma limpeza periódica.
+Efeito colateral desejável: `T1059.007` passou a ficar **sem cobertura** em vez
+de "coberta" por algo que não deveria rodar.
+
+**Ressalva 1 (cobertura do catálogo) — CONTINUA, agora medida.** No último scan
+o pipeline foi de ponta a ponta (`tier3 done`, risco 62/high) e a emulação
+executou **zero** técnicas: `techniques_executed: 0`, `success_rate: 0.0`,
+`caldera_validated: false`, `ttps_used: []`.
+
+A causa **não** é cadeia vazia — o Tier 2 produziu 7 elos. Reproduzindo o
+mapeamento contra o Caldera no ar, com as técnicas daquele scan:
+
+```
+tecnicas do Tier 2: T1036, T1059.007, T1185, T1550.001,
+                    T1552.001, T1553.001, T1598.003
+abilities mapeadas: 0   (catalogo=162, descartadas=0)
+```
+
+`descartadas=0` é o dado importante: elas nem chegaram ao filtro de sandbox —
+não existem no catálogo. **A divergência é no nível de sub-técnica**, e isso é
+novo: o catálogo *tem* as famílias pedidas, em outras variantes.
+
+| Pedido pelo Tier 2 | O que o catálogo tem |
+|---|---|
+| `T1059.007` (JavaScript) | `T1059.001`, `T1059.002`, `T1059.004` |
+| `T1552.001` (Credentials In Files) | `T1552.002`, `T1552.003`, `T1552.004` |
+| `T1036`, `T1185`, `T1550.001`, `T1553.001`, `T1598.003` | nada da família |
+
+Três fatos estruturais por trás disso:
+
+1. **O catálogo padrão (Stockpile, 162 abilities, 58 técnicas-pai) é de
+   pós-exploração de host/AD**, e o alvo aqui é uma aplicação web. `T1185`
+   (Browser Session Hijacking) e `T1598.003` (Phishing for Information) não são
+   executáveis como ability em agente nenhum — não é lacuna de catálogo, é
+   incompatibilidade de categoria.
+2. **O catálogo é dominado por Windows**: 167 executores windows contra 71
+   linux, e o sandbox é linux.
+3. **O Tier 3 rededuz a cadeia usando técnicas-pai** (`T1190`, `T1552`, `T1036`,
+   `T1083`, `T1567`, `T1059`) — que teriam abilities. Mas a emulação roda
+   **antes** da análise profunda, sobre a cadeia do Tier 2, que é de
+   sub-técnicas.
+
+Medido: truncar a mesma lista para técnica-pai leva de **0 para 3 abilities**.
+
+**O relatório não mente sobre isso**, e isso é bom: cada elo sai marcado
+`validado por Caldera: não`, e o rodapé diz `Caldera: available (0/0 técnicas
+executadas com sucesso — validação não completada)`. O que confunde é o campo
+`status: "ok"`/`caldera_status=ok`, que significa **"o Caldera respondeu"**, não
+"emulou" — vale renomear, porque lido de fora parece sucesso.
+
+**Passos 1–3 implementados em 2026-08-02.**
+
+1. ✅ **`status: "ok"` → `"reachable"`.** O campo responde "o Caldera
+   respondeu?", não "a emulação validou?" — e `0/0 técnicas executadas` com
+   `status: ok` lia-se como sucesso. Quem valida é `caldera_validated`.
+2. ✅ **Fallback para a técnica-pai, rotulado.** `_map_to_abilities` faz duas
+   passadas: casamento exato e, só para o que sobrou descoberto, a técnica-pai.
+   Medido contra o Caldera no ar com as 7 técnicas do scan real: **0 → 3
+   abilities** (`T1059.004`, `T1552.003`, `T1552.004`).
+
+   O resultado da segunda passada **não vale como validação**: `_parse_results`
+   separa os elos bem-sucedidos e só os de técnica casada exatamente ligam
+   `caldera_validated`.
+
+   **Verificado em execução real** contra o Caldera no ar, com as 7 técnicas do
+   scan, depois do filtro de implantação:
+
+   ```
+   status                : reachable
+   techniques_executed   : 2      techniques_successful : 2
+   success_rate          : 1.0
+   caldera_validated     : False   <- 100% de sucesso e mesmo assim falso
+   validacao_parcial     : True
+   tecnicas_por_pai      : ['T1552.001']
+   tecnicas_sem_cobertura: ['T1036','T1059.007','T1185','T1550.001',
+                            'T1553.001','T1598.003']
+   ttps_used             : ['T1552.003','T1552.004']
+   ```
+
+   É exatamente a leitura que se queria: *"rodei tudo que consegui, e nada disso
+   era o seu problema"*.
+3. ✅ **`technique_parent` no schema do Tier 2 + extração por regex.** O ganho
+   real aqui **não foi cobertura** — truncar `T1059.007` → `T1059` é string, e o
+   passo 2 já faz. O ganho foi robustez: `technique` vem de um LLM e era usado
+   verbatim, então `"T1059 - Command and Scripting"` não casava com nada e a
+   emulação rodava zero técnicas **sem erro algum**. Agora o ID sai por
+   `\bT\d{4}(?:\.\d{3})?\b` e `technique_parent` serve de resgate quando
+   `technique` vem vazia ou ilegível.
+
+   O pai **não** é somado à lista de técnicas pedidas: pedi-lo explicitamente
+   faria o casamento parecer exato e apagaria a distinção do passo 2.
+
+**Passo 4 continua aberto — e é o que realmente importa.** Depois dos três
+acima, das 7 técnicas do scan real **6 seguem sem qualquer cobertura**
+(`T1036`, `T1059.007`, `T1185`, `T1550.001`, `T1553.001`, `T1598.003`) e apenas
+`T1552.001` rende validação parcial. Nenhum encanamento resolve isso: um catálogo de
+pós-exploração de host valida mal achados de aplicação web. Ou entram abilities
+próprias (web/API), ou a emulação passa a ser declaradamente aplicável só a
+parte dos achados. **É decisão de produto.**
+
+Como a análise do Tier 2 não é determinística, a lista de técnicas varia entre
+scans do mesmo commit — então `caldera_validated: true` seguirá possível e não
+garantido, mesmo depois de (2) e (3).
 
 ---
 
@@ -193,12 +295,82 @@ tipos estão corretos (CSP ausente, Cross-Domain Misconfiguration…), mas
 `file_path` ficou **vazio em todos** — o ZAP reporta URL, não arquivo, e essa
 dimensão se perdeu. Você sabe *que* falta CSP, não *em quais rotas*.
 
+**Corrigido o mapeamento (2026-08-02), a escala inverteu.** Preservando a rota em
+`file_path`, um scan do Juice Shop passou a gravar **8.474 findings** — três
+ordens de grandeza acima das outras fontes (50 do TruffleHog, 7 do Semgrep). Duas
+consequências já sentidas:
+
+1. Estourou o `bulk_save`: 8474 × 19 colunas = 161k parâmetros num INSERT único,
+   contra o teto de 65535 do Postgres. O Tier 3 era marcado como `failed` por
+   causa da **escrita**, com o scan já concluído — e como
+   `persistir_ou_falhar` roda antes do Caldera, a emulação e o relatório do Tier
+   3 nem chegavam a acontecer. Resolvido fatiando o insert por lote.
+2. O front busca no máximo 1000 findings e já exibe o aviso de lista truncada
+   permanentemente. O ZAP afoga TruffleHog e Semgrep na ordenação.
+
+Ou seja: a agregação deixou de ser cosmética e virou pré-requisito para a tela
+de Findings ser utilizável com DAST ligado.
+
+**Resolvido em 2026-08-02.** `GET /findings/groups` agrega por
+`source`+`severity`+`tier`+`title`+`asset` e devolve ocorrências, caminhos
+distintos, intervalo de datas e uma amostra de caminhos. Os 12.047 findings do
+banco viram **14 grupos** — a truncagem em 1000 deixa de existir na visão
+agrupada, que passou a ser o padrão da tela. A visão plana continua disponível,
+e o drill-down de um grupo usa `GET /findings?title=<exato>`, que restringe no
+servidor em vez de depender do corte do cliente.
+
+Duas notas de implementação que custaram tempo e valem lembrar:
+
+- A agregação são **duas** consultas, não uma. Uma só exigiria `array_agg` para
+  a amostra, que é exclusivo do Postgres — e os testes rodam em SQLite.
+  `count(...) FILTER (...)` e `row_number()` existem nos dois.
+- A primeira versão pegava o id representativo com `min(uuid)`. Isso **funciona
+  no SQLite** (uuid é texto lá) e **não existe no Postgres**: teria passado
+  verde no teste e quebrado em produção. O id passou a sair da própria consulta
+  de amostra. Vale como lembrete geral — a suíte não cobre diferença de dialeto.
+
 O mesmo mecanismo, portanto, afoga a lista com findings idênticos do TruffleHog
 e joga fora o dado mais útil do ZAP.
 
 **Próximo passo.** Duas frentes: na UI, agrupar por `secret_type` + valor com
 contagem e expansão; no mapeamento do ZAP, preservar a URL (em `file_path` ou
 campo próprio) para o dedup não colapsar rotas distintas.
+
+---
+
+## 6.1 Histórico de execuções — FEITO, com duas ressalvas (2026-08-02)
+
+Rescanear a mesma branch deixou de sobrescrever a execução anterior: `scan_jobs`
+passou a ter **uma linha por execução** (índice unique parcial garantindo no
+máximo uma *em andamento* por commit) e `scan_reports` passou a ser chaveado por
+`(scan_job_id, tier)`. `GET /scans/{id}/history` lista as execuções do commit e
+a tela de detalhe do relatório mostra o histórico.
+
+**Ressalva 1 — os findings não são escopados por execução.** `dedup_key` ainda
+inclui `commit_sha`, não a execução, e o `ON CONFLICT DO NOTHING` faz o conjunto
+de findings de um commit apenas *crescer* entre reexecuções. Duas execuções do
+mesmo commit exibem a mesma lista de findings; o que difere entre elas é o
+relatório, o risco final e os status de tier.
+
+Para código isso é quase sempre correto (mesmo commit = mesmo código), mas para
+**DAST é falso**: o ZAP roda contra o alvo implantado, e duas execuções do mesmo
+commit podem legitimamente achar coisas diferentes.
+
+Escopar findings por execução é uma decisão de custo, não de dificuldade: o ZAP
+grava ~1800 findings por scan, então N execuções multiplicam a tabela por N e a
+tela de Findings (que já corta em 1000 e mostra aviso de truncagem) passaria a
+exibir a mesma vulnerabilidade N vezes. Fazer isso exige, junto, resolver a
+agregação da §6 e um filtro "só a execução mais recente" no `GET /findings`.
+
+**Ressalva 2 — o canvas Celery não carrega o id da execução.** Só o `commit_sha`
+trafega entre as tasks; o repositório resolve para "a execução corrente daquele
+commit" (`_id_execucao_corrente`). É unívoco na prática, mas existe uma janela:
+se um redisparo acontecer entre o último tier encerrar e uma task atrasada da
+execução anterior escrever, a escrita atrasada cai na execução nova. Fechar isso
+é mecânico — gerar o uuid no orquestrador (antes de montar o canvas, como já é
+feito hoje com o `create_scan_job`) e passá-lo como kwarg em todas as tasks —,
+mas mexe em ~10 assinaturas de task e no canvas, que é a parte mais frágil do
+sistema. Não foi feito junto de propósito.
 
 ---
 

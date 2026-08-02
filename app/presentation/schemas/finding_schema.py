@@ -101,3 +101,61 @@ class FindingPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class FindingGroupResponse(BaseModel):
+    """Um TIPO de vulnerabilidade com todas as suas ocorrencias somadas.
+
+    A lista crua deixou de ser legivel com DAST ligado: um scan do Juice Shop
+    grava ~12 mil findings que sao, na pratica, 14 problemas repetidos por
+    milhares de rotas. Agregado, o mesmo conjunto cabe na tela inteiro — sem a
+    truncagem em 1000 que a listagem plana precisa aplicar.
+    """
+
+    source: str
+    severity: str
+    tier: int
+    title: str
+    cve_id: str | None
+    cwe_id: str | None
+    asset: str | None
+    ocorrencias: int
+    caminhos: int
+    algum_secret_verificado: bool
+    primeiro_em: datetime
+    ultimo_em: datetime
+    # Liga o grupo ao deep link de um finding concreto (`?finding=<id>`).
+    exemplo_finding_id: UUID
+    # Primeiros caminhos afetados, para a expansao do grupo sem nova chamada.
+    amostra: list[str]
+
+    @classmethod
+    def from_group(cls, g) -> "FindingGroupResponse":
+        return cls(
+            source=g.source,
+            severity=g.severity,
+            tier=g.tier,
+            title=g.title,
+            cve_id=g.cve_id,
+            cwe_id=g.cwe_id,
+            asset=g.asset,
+            ocorrencias=g.ocorrencias,
+            caminhos=g.caminhos,
+            algum_secret_verificado=g.algum_secret_verificado,
+            primeiro_em=g.primeiro_em,
+            ultimo_em=g.ultimo_em,
+            exemplo_finding_id=g.exemplo_finding_id,
+            amostra=g.amostra,
+        )
+
+
+class FindingGroupList(BaseModel):
+    """Grupos de findings, do mais severo para o mais volumoso."""
+
+    items: list[FindingGroupResponse]
+    # Total de findings representados (soma das ocorrencias), nao de grupos.
+    total_findings: int
+    # True quando o teto de grupos foi atingido: ai `total_findings` conta so os
+    # grupos devolvidos e subestima o real. Mesmo contrato do `truncated` da
+    # listagem plana — um numero cortado sem aviso mente pior do que um aviso.
+    truncado: bool = False

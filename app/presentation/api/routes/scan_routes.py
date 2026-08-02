@@ -62,13 +62,31 @@ def _build_summary(findings: list[Finding]) -> FindingsSummary:
     return FindingsSummary(by_severity=by_severity, by_tier=by_tier, total=len(findings))
 
 
-def _owned_job_or_404(db: Session, commit_sha: str, user_id: UUID):
-    """Retorna o ScanJob do commit se pertencer ao usuário; senão 404.
+def _owned_job_or_404(db: Session, scan_id: str, user_id: UUID):
+    """Resolve ``scan_id`` para um ScanJob do usuário; senão 404.
+
+    Aceita duas formas, e a distinção importa desde que o mesmo commit pode ter
+    várias execuções:
+
+    - **uuid** → aquela execução específica. É o que endereça o histórico.
+    - **commit sha** → a execução **corrente** daquele commit. Mantido porque é
+      o que o disparo manual devolve (``ManualScanResponse.commit_sha``) e o que
+      links antigos usam; responde "como está este commit agora".
 
     Isolamento: um usuário nunca enxerga o scan de outro. Usamos 404 (não 403)
     para não vazar a existência do commit.
     """
-    job = SQLAlchemyScanJobRepository(db).get_by_commit(commit_sha)
+    repo = SQLAlchemyScanJobRepository(db)
+    job = None
+    try:
+        job = repo.get_by_id(UUID(scan_id))
+    except ValueError:
+        pass
+    if job is None:
+        # Não é `else`: ``UUID()`` aceita 32 hex sem hífen, então um sha
+        # abreviado entraria no ramo do uuid e sairia como 404 sem nunca ter
+        # sido procurado como commit.
+        job = repo.get_by_commit(scan_id)
     if job is None or job.user_id != user_id:
         raise HTTPException(status_code=404, detail="Scan nao encontrado")
     return job
@@ -98,9 +116,9 @@ def list_scans(
 
 
 @router.get(
-    "/{commit_sha}",
+    "/{scan_id}",
     response_model=ScanJobResponse,
-    summary="Consultar status de um scan por commit",
+    summary="Consultar um scan por id de execucao (ou commit)",
     responses={
         404: {
             "description": "Scan nao encontrado.",
@@ -109,20 +127,25 @@ def list_scans(
     },
 )
 def get_scan(
-    commit_sha: str,
+    scan_id: str,
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user),
 ) -> ScanJobResponse:
-    """Retorna o status de um scan do usuário pelo `commit_sha`, com resumo de findings."""
-    job = _owned_job_or_404(db, commit_sha, user_id)
+    """Retorna uma execução (uuid) ou a execução corrente de um commit (sha),
+    com resumo de findings.
 
-    findings = SQLAlchemyFindingRepository(db).get_by_commit(commit_sha)
+    O resumo é dos findings do **commit** — eles não são escopados por execução
+    (reexecutar o mesmo commit analisa o mesmo código). Ver docs/pendencias.md.
+    """
+    job = _owned_job_or_404(db, scan_id, user_id)
+
+    findings = SQLAlchemyFindingRepository(db).get_by_commit(job.commit_sha)
     summary = _build_summary(findings)
     return ScanJobResponse.from_entity(job, summary)
 
 
 @router.get(
-    "/{commit_sha}/report",
+    "/{scan_id}/report",
     response_model=ScanReportsResponse,
     summary="Listar relatorios de um scan (todos os tiers)",
     responses={
@@ -133,25 +156,29 @@ def get_scan(
     },
 )
 def get_scan_reports(
-    commit_sha: str,
+    scan_id: str,
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user),
 ) -> ScanReportsResponse:
-    """Retorna os relatorios (um por tier) do `commit_sha`, se for do usuário.
+    """Retorna os relatorios (um por tier) **daquela execução**.
+
+    Passar o sha devolve os da execução corrente; passar o uuid devolve os
+    daquela execução do histórico — é a diferença que torna o histórico útil.
 
     404 se o scan não existir ou não pertencer ao usuário. Lista vazia se o
     scan existe mas ainda não há relatórios (pipeline em andamento).
     """
-    _owned_job_or_404(db, commit_sha, user_id)
-    reports = SQLAlchemyScanReportRepository(db).get_by_commit(commit_sha)
+    job = _owned_job_or_404(db, scan_id, user_id)
+    reports = SQLAlchemyScanReportRepository(db).get_by_scan_job(job.id)
     return ScanReportsResponse(
-        commit_sha=commit_sha,
+        scan_id=job.id,
+        commit_sha=job.commit_sha,
         reports=[ScanReportResponse.from_entity(r) for r in reports],
     )
 
 
 @router.get(
-    "/{commit_sha}/tiers/{tier}/report",
+    "/{scan_id}/tiers/{tier}/report",
     response_model=ScanReportResponse,
     summary="Consultar relatorio de um tier especifico",
     responses={
@@ -164,15 +191,50 @@ def get_scan_reports(
     },
 )
 def get_scan_report_by_tier(
-    commit_sha: str,
+    scan_id: str,
     tier: int = Path(..., ge=1, le=3),
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user),
 ) -> ScanReportResponse:
-    """Retorna o relatorio de um tier (1-3) do `commit_sha`, se for do usuário."""
-    _owned_job_or_404(db, commit_sha, user_id)
-    report = SQLAlchemyScanReportRepository(db).get_by_commit_and_tier(commit_sha, tier)
+    """Retorna o relatorio de um tier (1-3) daquela execução, se for do usuário."""
+    job = _owned_job_or_404(db, scan_id, user_id)
+    report = SQLAlchemyScanReportRepository(db).get_by_scan_job_and_tier(job.id, tier)
     if report is None:
         raise HTTPException(status_code=404, detail="Relatorio nao encontrado")
 
     return ScanReportResponse.from_entity(report)
+
+
+@router.get(
+    "/{scan_id}/history",
+    response_model=ScanJobPage,
+    summary="Listar execucoes anteriores do mesmo commit",
+    responses={
+        404: {
+            "description": "Scan nao encontrado.",
+            "content": {"application/json": {"example": {"detail": "Scan nao encontrado"}}},
+        }
+    },
+)
+def get_scan_history(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> ScanJobPage:
+    """Todas as execuções daquele commit, da mais recente para a mais antiga.
+
+    Existe porque rescanear a mesma branch deixou de sobrescrever a execução
+    anterior. A lista inclui a própria execução consultada.
+    """
+    job = _owned_job_or_404(db, scan_id, user_id)
+    execucoes = [
+        j
+        for j in SQLAlchemyScanJobRepository(db).list_by_commit(job.commit_sha)
+        if j.user_id == user_id
+    ]
+    return ScanJobPage(
+        items=[ScanJobSummary.from_entity(j) for j in execucoes],
+        total=len(execucoes),
+        limit=len(execucoes),
+        offset=0,
+    )

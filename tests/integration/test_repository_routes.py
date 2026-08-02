@@ -192,22 +192,22 @@ def repo_with_data(session_factory, user_id, account):
     """Cria um Repository do usuário + ScanJob/Finding/ScanReport de um commit."""
     sha = "d" * 40
     rid = uuid4()
+    job = ScanJob(commit_sha=sha, repo_url="https://github.com/acme/api",
+                  installation_id=42, user_id=user_id, repository_id=rid)
     with session_factory() as s:
         SQLAlchemyRepositoryRepository(s).save(
             Repository(id=rid, user_id=user_id, github_account_id=account,
                        installation_id=42, github_repo_id=100, full_name="acme/api",
                        url="https://github.com/acme/api")
         )
-        SQLAlchemyScanJobRepository(s).save(
-            ScanJob(commit_sha=sha, repo_url="https://github.com/acme/api",
-                    installation_id=42, user_id=user_id, repository_id=rid)
-        )
+        SQLAlchemyScanJobRepository(s).save(job)
         SQLAlchemyFindingRepository(s).bulk_save([
             Finding(source="semgrep", severity=Severity.HIGH, title="t", description="d",
                     commit_sha=sha, repo_url="https://github.com/acme/api", tier=2)
         ])
+        # o relatório pertence à EXECUÇÃO (scan_job_id é NOT NULL), não ao commit
         SQLAlchemyScanReportRepository(s).save(
-            ScanReport(commit_sha=sha, tier=2, report_markdown="## r",
+            ScanReport(commit_sha=sha, scan_job_id=job.id, tier=2, report_markdown="## r",
                        analysis_json={}, degraded=False, comment_id=1, posted=True)
         )
         s.commit()

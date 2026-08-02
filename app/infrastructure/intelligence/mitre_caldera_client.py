@@ -24,6 +24,7 @@ testes injetam ``poll_interval=0`` no construtor.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
 import time
 from typing import Any
@@ -47,6 +48,33 @@ _NAMESPACES_EXTERNOS = frozenset(
 
 # Marcas de credencial em qualquer namespace.
 _MARCAS_DE_CREDENCIAL = ("api.key", "access.token", "secret", "password", "passwd")
+
+
+@dataclass
+class MapeamentoAbilities:
+    """O que sobrou depois de traduzir técnicas MITRE em abilities do Caldera.
+
+    Não basta a lista de abilities: é preciso saber **como** cada uma foi
+    encontrada. Uma ability achada porque a sub-técnica pedida existe no
+    catálogo valida o achado; uma achada por fallback para a técnica-pai valida
+    algo *relacionado* — `T1059.001` (PowerShell) quando o achado é `T1059.007`
+    (JavaScript) é a mesma família, não o mesmo ataque. Tratar as duas como
+    iguais transformaria "emulei um primo do seu problema" em
+    `caldera_validated: true`.
+    """
+
+    abilities: list[str] = field(default_factory=list)
+    #: technique_ids do CATÁLOGO que casaram exatamente com o que foi pedido.
+    tids_exatos: set[str] = field(default_factory=set)
+    #: technique_ids do catálogo que só entraram via fallback de pai.
+    tids_por_pai: set[str] = field(default_factory=set)
+    #: técnicas PEDIDAS que só foram cobertas truncando para o pai.
+    pedidas_por_pai: list[str] = field(default_factory=list)
+    #: técnicas pedidas sem nenhuma ability, nem após o fallback.
+    pedidas_sem_cobertura: list[str] = field(default_factory=list)
+    descartadas: int = 0
+    #: descartadas por implantarem outro agente (ver `_implanta_agente`).
+    implantam_agente: int = 0
 
 
 class CalderaClient:
@@ -86,8 +114,13 @@ class CalderaClient:
         name: str,
         mitre_techniques: list[str],
         has_verified_secrets: bool = False,
+        *,
+        mapeamento: MapeamentoAbilities | None = None,
     ) -> str:
-        abilities = self._map_to_abilities(mitre_techniques)
+        """Cria o adversário. `mapeamento` evita mapear duas vezes quando o
+        `run_safe` já precisou do detalhe para classificar a validação."""
+        mapa = mapeamento or self._map_to_abilities(mitre_techniques)
+        abilities = mapa.abilities
         resp = self.client.post(
             "/api/v2/adversaries",
             json={
@@ -122,7 +155,9 @@ class CalderaClient:
         resp.raise_for_status()
         return resp.json()["id"]
 
-    def await_results(self, operation_id: str) -> dict[str, Any]:
+    def await_results(
+        self, operation_id: str, mapeamento: MapeamentoAbilities | None = None
+    ) -> dict[str, Any]:
         # Bound de iterações; cada loop espera ``poll_interval``
         # segundos (0 nos testes para evitar sleep real).
         iterations = max(self.MAX_WAIT // max(self.poll_interval, 1), 1)
@@ -131,7 +166,7 @@ class CalderaClient:
             resp.raise_for_status()
             op = resp.json()
             if op.get("state") == "finished":
-                return self._parse_results(op)
+                return self._parse_results(op, mapeamento)
             if self.poll_interval > 0:
                 time.sleep(self.poll_interval)
         raise TimeoutError(
@@ -151,20 +186,28 @@ class CalderaClient:
 
         Retorna sempre um dict (decisão #1):
 
-        - sucesso: ``{"status": "ok", "success_rate": …, "ttps_used": …,
-          "caldera_validated": bool, …}``
+        - alcançado: ``{"status": "reachable", "success_rate": …, "ttps_used": …,
+          "caldera_validated": bool, "validacao_parcial": bool, …}``
+
+        ``status`` responde **"o Caldera respondeu?"**, não "a emulação
+        validou?". Era ``"ok"``, e isso se lia como sucesso mesmo em resultados
+        com ``0/0 técnicas executadas`` — quem valida é ``caldera_validated``.
         - falha:   ``{"status": "failed", "reason": "…",
           "caldera_validated": False, "success_rate": 0.0,
           "techniques_executed": 0, "techniques_successful": 0,
           "ttps_used": []}``
         """
         try:
+            mapa = self._map_to_abilities(mitre_techniques)
             adversary_id = self.create_adversary(
-                adversary_name, mitre_techniques, has_verified_secrets
+                adversary_name,
+                mitre_techniques,
+                has_verified_secrets,
+                mapeamento=mapa,
             )
             operation_id = self.run_operation(adversary_id)
-            results = self.await_results(operation_id)
-            results.setdefault("status", "ok")
+            results = self.await_results(operation_id, mapa)
+            results.setdefault("status", "reachable")
             return results
         except TimeoutError as exc:
             logger.warning(
@@ -239,8 +282,8 @@ class CalderaClient:
         )
         return total
 
-    def _map_to_abilities(self, techniques: list[str]) -> list[str]:
-        """Traduz TTPs MITRE (``T1059``) em ability IDs do Caldera.
+    def _map_to_abilities(self, techniques: list[str]) -> MapeamentoAbilities:
+        """Traduz TTPs MITRE (``T1059``) em abilities do Caldera.
 
         Era um stub que devolvia ``[]``, e o efeito passava despercebido: o
         adversário nascia **sem nenhuma ability**, a operação terminava com
@@ -253,21 +296,29 @@ class CalderaClient:
         catálogo inteiro são ~162 abilities, então buscar tudo uma vez e casar
         aqui é mais simples e mais barato que N requisições.
 
-        **Sub-técnicas contam.** O catálogo usa ``T1497.003``; pedir ``T1497``
-        casa com todas as filhas. Pedir a filha exata casa só com ela.
+        **Duas passadas, e a segunda é rotulada.** A primeira casa exatamente:
+        pedir ``T1497`` pega todas as filhas, pedir ``T1497.003`` pega só ela.
+        Uma sub-técnica que não sobrou de lá tenta de novo pelo **pai** — foi o
+        que um scan real expôs: o Tier 2 pediu ``T1059.007``/``T1552.001`` e o
+        catálogo só tem ``T1059.001/.002/.004`` e ``T1552.002/.003/.004``, então
+        7 técnicas viravam 0 abilities. Truncar para o pai leva a 3.
+
+        O resultado dessa segunda passada **não vale como validação do achado**:
+        é a mesma família, outro ataque. Por isso os dois conjuntos voltam
+        separados, e é ``_parse_results`` quem decide o que conta.
 
         Só entram abilities com executor **linux**: o agente do sandbox roda
         Linux, e ability de Windows na cadeia vira link que falha, derrubando o
         ``success_rate`` por motivo que não é do alvo.
         """
         if not techniques:
-            return []
+            return MapeamentoAbilities()
 
         pedidas = {
             str(t or "").strip().upper() for t in techniques if str(t or "").strip()
         }
         if not pedidas:
-            return []
+            return MapeamentoAbilities()
 
         try:
             resp = self.client.get("/api/v2/abilities")
@@ -275,38 +326,142 @@ class CalderaClient:
             catalogo = resp.json() or []
         except Exception as exc:  # noqa: BLE001 — best-effort, como o resto
             logger.warning("caldera_ability_lookup_failed", error=str(exc))
-            return []
+            return MapeamentoAbilities()
 
-        abilities: list[str] = []
-        descartadas: list[str] = []
+        mapa = MapeamentoAbilities()
+        # Chaveado por ability_id: a passada exata e a do fallback avaliam a
+        # mesma ability, e contar duas vezes inflava o diagnóstico.
+        descartadas: dict[str, str] = {}
+        implantadoras: dict[str, str] = {}
+
+        # --- 1a passada: casamento exato -----------------------------------
+        cobertas = self._coletar(
+            catalogo, pedidas, mapa, descartadas, implantadoras, exato=True
+        )
+
+        # --- 2a passada: fallback para o pai, só do que ficou descoberto ----
+        descobertas = pedidas - cobertas
+        pais = {
+            t.split(".", 1)[0]
+            for t in descobertas
+            if "." in t and t.split(".", 1)[0] not in pedidas
+        }
+        if pais:
+            cobertos_por_pai = self._coletar(
+                catalogo, pais, mapa, descartadas, implantadoras, exato=False
+            )
+            mapa.pedidas_por_pai = sorted(
+                t for t in descobertas if t.split(".", 1)[0] in cobertos_por_pai
+            )
+
+        mapa.pedidas_sem_cobertura = sorted(
+            descobertas - set(mapa.pedidas_por_pai)
+        )
+        mapa.descartadas = len(descartadas)
+        mapa.implantam_agente = len(implantadoras)
+
+        # `descartadas` distingue "a técnica não existe no catálogo" de "existe,
+        # mas não roda aqui"; `por_pai` distingue as duas de "existe algo da
+        # família, mas não o que foi pedido".
+        logger.info(
+            "caldera_abilities_mapeadas",
+            tecnicas=len(pedidas),
+            abilities=len(mapa.abilities),
+            exatas=len(mapa.tids_exatos),
+            por_pai=len(mapa.tids_por_pai),
+            pedidas_por_pai=mapa.pedidas_por_pai[:3],
+            sem_cobertura=mapa.pedidas_sem_cobertura[:3],
+            descartadas=mapa.descartadas,
+            implantam_agente=mapa.implantam_agente,
+            exemplos_descartados=list(descartadas.values())[:3],
+            exemplos_implantadoras=list(implantadoras.values())[:3],
+            catalogo=len(catalogo),
+        )
+        return mapa
+
+    def _coletar(
+        self,
+        catalogo: list,
+        alvos: set[str],
+        mapa: MapeamentoAbilities,
+        descartadas: dict[str, str],
+        implantadoras: dict[str, str],
+        *,
+        exato: bool,
+    ) -> set[str]:
+        """Acrescenta a `mapa` as abilities que casam com `alvos`.
+
+        Devolve quais `alvos` chegaram a produzir alguma ability — é isso que
+        diz o que ainda está descoberto e precisa do fallback.
+        """
+        cobertos: set[str] = set()
         for ability in catalogo:
             if not isinstance(ability, dict):
                 continue
             tid = str(ability.get("technique_id") or "").upper()
-            if not tid or not self._casa_tecnica(tid, pedidas):
+            if not tid or not self._casa_tecnica(tid, alvos):
                 continue
             if not self._tem_executor_linux(ability):
                 continue
             ability_id = ability.get("ability_id") or ability.get("id")
-            if not ability_id or ability_id in abilities:
+            if not ability_id or ability_id in mapa.abilities:
+                continue
+            if self._implanta_agente(ability):
+                # Antes do filtro de credencial: esta é a que causa laço.
+                if ability_id not in implantadoras:
+                    implantadoras[ability_id] = ability.get("name") or ability_id
+                    logger.warning(
+                        "caldera_ability_implanta_agente_descartada",
+                        ability=implantadoras[ability_id],
+                        technique_id=tid,
+                    )
                 continue
             if not self._executavel_no_sandbox(ability):
-                descartadas.append(ability.get("name") or ability_id)
+                descartadas[ability_id] = ability.get("name") or ability_id
                 continue
-            abilities.append(ability_id)
+            mapa.abilities.append(ability_id)
+            (mapa.tids_exatos if exato else mapa.tids_por_pai).add(tid)
+            cobertos.add(tid if tid in alvos else tid.split(".", 1)[0])
+        return cobertos
 
-        # `descartadas` é o que distingue "a técnica não existe no catálogo" de
-        # "existe, mas não roda aqui" — sem esse número o relatório dizia apenas
-        # `caldera_validated: false`, sem dizer o motivo.
-        logger.info(
-            "caldera_abilities_mapeadas",
-            tecnicas=len(pedidas),
-            abilities=len(abilities),
-            descartadas=len(descartadas),
-            exemplos_descartados=descartadas[:3],
-            catalogo=len(catalogo),
-        )
-        return abilities
+    #: O binário do agente do Caldera. `54ndc47` é como o Stockpile escreve
+    #: "sandcat" — as duas grafias aparecem em comando e em payload.
+    _MARCADOR_AGENTE = re.compile(r"sandcat|54ndc47", re.I)
+
+    @classmethod
+    def _implanta_agente(cls, ability: dict[str, Any]) -> bool:
+        """`True` se a ability inicia/instala outro agente do Caldera.
+
+        **Incidente real (2026-08-02).** Uma operação pediu `T1059.007`; o
+        fallback de pai trouxe `T1059.004` → **"Start 54ndc47"**, cujo comando é
+        `nohup ./sandcat.go -server ... &`. Como uma operação executa cada
+        ability em **todos** os agentes do grupo, cada execução criava um agente
+        que entrava no grupo e recebia a mesma ability. Em 10 minutos foram 20
+        agentes e 43 elos, a operação nunca terminou (timeout de 600s) e a
+        máquina do dev pagou a conta.
+
+        Isso também explica melhor os "20 agentes acumulados" que antes foram
+        atribuídos só ao `restart: unless-stopped` do container: fixar o PAW
+        resolve o reinício, não este laço.
+
+        São 5 abilities linux de 70 no catálogo padrão, todas de implantação:
+        `Start 54ndc47`, `Start 54ndc47 (2)`, `Sandcat`, `Copy 54ndc47` e
+        `Weak executable files` — esta última escreve um lançador do agente em
+        todo executável gravável que encontra.
+
+        Emular implantação de agente não diz nada sobre o achado do scan: o que
+        ela prova é que o Caldera consegue instalar o Caldera.
+        """
+        for executor in ability.get("executors", []) or []:
+            if str(executor.get("platform", "")).lower() != "linux":
+                continue
+            alvo = " ".join(
+                [str(executor.get("command") or "")]
+                + [str(p) for p in (executor.get("payloads") or [])]
+            )
+            if cls._MARCADOR_AGENTE.search(alvo):
+                return True
+        return False
 
     @staticmethod
     def _facts_exigidos(ability: dict[str, Any]) -> set[str]:
@@ -362,18 +517,39 @@ class CalderaClient:
                 return True
         return False
 
-    def _parse_results(self, op: dict[str, Any]) -> dict[str, Any]:
+    def _parse_results(
+        self, op: dict[str, Any], mapeamento: MapeamentoAbilities | None = None
+    ) -> dict[str, Any]:
         links = op.get("chain", []) or []
         successful = [link for link in links if link.get("status") == 0]
+
+        def tid_do(link: dict[str, Any]) -> str:
+            return str((link.get("ability", {}) or {}).get("technique_id") or "").upper()
+
+        # Sem mapeamento (chamada direta em teste), tudo conta como exato — é o
+        # comportamento antigo. Com mapeamento, só valida o que casou com a
+        # técnica PEDIDA: um sucesso vindo do fallback de pai emulou a família,
+        # não o achado, e não pode virar `caldera_validated: true`.
+        if mapeamento is None or not mapeamento.tids_por_pai:
+            exatos = successful
+        else:
+            exatos = [
+                link for link in successful if tid_do(link) in mapeamento.tids_exatos
+            ]
+        parciais = [link for link in successful if link not in exatos]
+
         return {
             "techniques_executed": len(links),
             "techniques_successful": len(successful),
             "success_rate": (len(successful) / len(links)) if links else 0.0,
-            "ttps_used": [
-                (link.get("ability", {}) or {}).get("technique_id")
-                for link in links
-            ],
-            "caldera_validated": len(successful) > 0,
+            "ttps_used": [tid_do(link) or None for link in links],
+            "caldera_validated": len(exatos) > 0,
+            # Emulou algo da mesma família da técnica pedida, mas não ela.
+            "validacao_parcial": len(exatos) == 0 and len(parciais) > 0,
+            "tecnicas_por_pai": list(mapeamento.pedidas_por_pai) if mapeamento else [],
+            "tecnicas_sem_cobertura": (
+                list(mapeamento.pedidas_sem_cobertura) if mapeamento else []
+            ),
         }
 
 
@@ -386,4 +562,7 @@ def _failed_result(reason: str) -> dict[str, Any]:
         "techniques_successful": 0,
         "ttps_used": [],
         "caldera_validated": False,
+        "validacao_parcial": False,
+        "tecnicas_por_pai": [],
+        "tecnicas_sem_cobertura": [],
     }

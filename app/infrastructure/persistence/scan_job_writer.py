@@ -7,8 +7,13 @@ pipeline. O canvas Celery opera sobre os dicts que trafegam entre as
 tasks, não sobre o banco; o ``scan_jobs`` é apenas a projeção consumível
 via API (``GET /scans``).
 
-Tudo é chaveado por ``commit_sha`` (a chave natural que já flui no canvas)
-e gated por ``settings.SCAN_PERSISTENCE_ENABLED`` (testes desligam).
+Tudo é chaveado por ``commit_sha`` — a única identidade que flui no canvas
+Celery. Como agora existem várias execuções por commit, o repositório resolve
+isso para a **execução corrente** (ver ``_id_execucao_corrente``); estas funções
+continuam falando em ``commit_sha`` de propósito, para não ter que costurar um
+id novo por todas as assinaturas de task.
+
+Gated por ``settings.SCAN_PERSISTENCE_ENABLED`` (testes desligam).
 """
 from __future__ import annotations
 
@@ -39,22 +44,21 @@ def create_scan_job(
     user_id: UUID | None = None,
     repository_id: UUID | None = None,
 ) -> None:
-    """Cria (ou **reinicia**) o ``ScanJob`` no início do pipeline, com o Tier 1
-    já em ``running``.
+    """Insere uma **execução nova** no início do pipeline, com o Tier 1 já em
+    ``running``.
 
-    ``scan_jobs`` tem UNIQUE em ``commit_sha``, então um redisparo do mesmo
-    commit (novo push com o mesmo HEAD, scan manual repetido, retry) cai sempre
-    na mesma linha. Antes essa linha era simplesmente preservada — o ON CONFLICT
-    DO NOTHING do ``save`` — e os timestamps da execução ANTERIOR ficavam
-    valendo: uma linha chegou a alegar um Tier 1 de 22 horas quando a execução
-    real durou segundos. Por isso, quando a linha já existe, reiniciamos o
-    estado de execução (``tier*_status``/``tier*_started_at``/
-    ``tier*_completed_at``, ``blocked_at_tier``, ``final_risk_*``).
+    Redisparar o mesmo commit (novo push com o mesmo HEAD, scan manual repetido,
+    retry) empilha uma linha em vez de reescrever a anterior — é assim que o
+    histórico de relatórios existe. Antes havia UNIQUE em ``commit_sha`` e a
+    execução anterior era sobrescrita por ``restart_execution``.
 
-    ``created_at`` é preservado de propósito: ele registra quando aquele commit
-    entrou no sistema pela primeira vez. A duração de uma execução deve ser
-    lida a partir dos ``tier*_started_at``, que agora são sempre da execução
-    corrente.
+    A idempotência continua garantida pelo índice unique parcial
+    (``uq_scan_jobs_commit_em_andamento``): dois disparos simultâneos do mesmo
+    commit não geram dois pipelines, porque o segundo colide com a execução que
+    o primeiro deixou em andamento e o ON CONFLICT DO NOTHING o descarta.
+
+    ``created_at`` agora é o início desta execução — não há mais o que preservar
+    de uma linha anterior.
 
     ``user_id``/``repository_id`` atribuem o scan ao dono (multi-tenant); ficam
     ``None`` para webhooks de repositórios não cadastrados (scan órfão, que não
@@ -62,7 +66,6 @@ def create_scan_job(
     """
     if not settings.SCAN_PERSISTENCE_ENABLED:
         return
-    reinicio = False
     try:
         iniciado_em = datetime.utcnow()
         job = ScanJob(
@@ -73,23 +76,19 @@ def create_scan_job(
             repo_full_name=repo_full_name,
             tier1_status=TierStatus.RUNNING,
             tier1_started_at=iniciado_em,
+            created_at=iniciado_em,
             user_id=user_id,
             repository_id=repository_id,
         )
         with SessionLocal() as db:
-            repo = SQLAlchemyScanJobRepository(db)
-            reinicio = repo.get_by_commit(commit_sha) is not None
-            if reinicio:
-                repo.restart_execution(commit_sha, started_at=iniciado_em)
-            else:
-                # ON CONFLICT DO NOTHING: cobre a corrida entre dois disparos
-                # simultâneos do mesmo commit (ambos leram "não existe").
-                repo.save(job)
+            # ON CONFLICT DO NOTHING contra o índice parcial: cobre a corrida
+            # entre dois disparos simultâneos do mesmo commit.
+            SQLAlchemyScanJobRepository(db).save(job)
             db.commit()
     except Exception as exc:  # noqa: BLE001 — best-effort: nunca quebra o pipeline
         logger.warning("scan_job_create_failed", commit_sha=commit_sha, error=str(exc))
         return
-    logger.info("scan_job_created", commit_sha=commit_sha, reinicio=reinicio)
+    logger.info("scan_job_created", commit_sha=commit_sha, scan_job_id=str(job.id))
 
 
 def mark_tier(commit_sha: str, tier: int, status: str) -> None:

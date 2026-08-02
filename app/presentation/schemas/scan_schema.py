@@ -10,6 +10,7 @@ primitivos (`str`/`int`) prontos para serializacao JSON.
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -25,6 +26,9 @@ class FindingsSummary(BaseModel):
 class ScanJobResponse(BaseModel):
     """Representacao completa do status de um `ScanJob`, com resumo de findings."""
 
+    # Identidade da EXECUÇÃO. O mesmo commit pode ter várias (rescan da mesma
+    # branch), então `commit_sha` deixou de identificar um scan sozinho.
+    id: UUID
     commit_sha: str
     repo_url: str
     repo_full_name: str | None
@@ -48,6 +52,7 @@ class ScanJobResponse(BaseModel):
     def from_entity(cls, job, summary: FindingsSummary) -> "ScanJobResponse":
         """Constroi o response a partir da entidade `ScanJob`, convertendo enums em valores."""
         return cls(
+            id=job.id,
             commit_sha=job.commit_sha,
             repo_url=job.repo_url,
             repo_full_name=job.repo_full_name,
@@ -72,6 +77,9 @@ class ScanJobResponse(BaseModel):
 class ScanJobSummary(BaseModel):
     """Versao enxuta de `ScanJobResponse` (sem resumo de findings), usada em listagens."""
 
+    # Identidade da EXECUÇÃO. O mesmo commit pode ter várias (rescan da mesma
+    # branch), então `commit_sha` deixou de identificar um scan sozinho.
+    id: UUID
     commit_sha: str
     repo_url: str
     repo_full_name: str | None
@@ -94,6 +102,7 @@ class ScanJobSummary(BaseModel):
     def from_entity(cls, job) -> "ScanJobSummary":
         """Constroi o resumo a partir da entidade `ScanJob`, convertendo enums em valores."""
         return cls(
+            id=job.id,
             commit_sha=job.commit_sha,
             repo_url=job.repo_url,
             repo_full_name=job.repo_full_name,
@@ -124,8 +133,15 @@ class ScanJobPage(BaseModel):
 
 
 class ScanReportResponse(BaseModel):
-    """Representacao de um `ScanReport` (relatorio markdown de um commit/tier)."""
+    """Representacao de um `ScanReport` (relatorio markdown de um tier).
 
+    Carrega `scan_id`/`commit_sha` porque a listagem por repositorio mistura
+    execucoes: sem eles, dois relatorios de tier 2 do mesmo commit sao
+    indistinguiveis.
+    """
+
+    scan_id: UUID
+    commit_sha: str
     tier: int
     report_markdown: str
     analysis_json: dict
@@ -138,6 +154,8 @@ class ScanReportResponse(BaseModel):
     def from_entity(cls, report) -> "ScanReportResponse":
         """Constroi o response a partir da entidade `ScanReport`."""
         return cls(
+            scan_id=report.scan_job_id,
+            commit_sha=report.commit_sha,
             tier=report.tier,
             report_markdown=report.report_markdown,
             analysis_json=report.analysis_json,
@@ -149,8 +167,9 @@ class ScanReportResponse(BaseModel):
 
 
 class ScanReportsResponse(BaseModel):
-    """Lista de relatorios (um por tier) associados a um commit."""
+    """Lista de relatorios (um por tier) de UMA execucao."""
 
+    scan_id: UUID
     commit_sha: str
     reports: list[ScanReportResponse]
 

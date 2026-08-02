@@ -946,6 +946,57 @@ de declararmos o daemon morto.
 
 ---
 
+## 13.1 O que "Caldera ok" significa — e o que não significa
+
+Três campos do `caldera_results` respondem perguntas diferentes, e confundi-los
+já produziu leitura errada de relatório:
+
+| Campo | Pergunta que responde |
+|---|---|
+| `status` | O serviço respondeu? (`reachable` / `failed`) |
+| `caldera_validated` | A técnica **encontrada** foi emulada com sucesso? |
+| `validacao_parcial` | Emulou-se algo da **mesma família**, mas não a técnica encontrada? |
+
+`status` era `"ok"`, e isso se lia como sucesso mesmo num resultado com `0/0
+técnicas executadas`. Foi renomeado para `reachable` justamente para não
+responder uma pergunta que não é a dele.
+
+### Fallback para a técnica-pai
+
+O catálogo padrão do Caldera (Stockpile, ~162 abilities) não cobre todas as
+sub-técnicas que o Tier 2 identifica. Num scan real as 7 técnicas da cadeia
+(`T1036`, `T1059.007`, `T1185`, `T1550.001`, `T1552.001`, `T1553.001`,
+`T1598.003`) mapearam para **zero** abilities: o catálogo tem
+`T1059.001/.002/.004` e `T1552.002/.003/.004`, outras variantes das mesmas
+famílias.
+
+`_map_to_abilities` faz então duas passadas. A primeira casa exatamente. A
+segunda, só para o que sobrou descoberto, tenta a **técnica-pai** — e recupera 3
+abilities no exemplo acima.
+
+**O que a segunda passada encontra não valida o achado.** Emular `T1059.001`
+(PowerShell) quando o achado é `T1059.007` (JavaScript) é a mesma família, outro
+ataque. Por isso `_parse_results` separa os elos bem-sucedidos: só os de técnica
+casada **exatamente** ligam `caldera_validated`. Um sucesso vindo apenas do
+fallback produz `caldera_validated: false` + `validacao_parcial: true`, e o
+relatório diz explicitamente que o achado não foi validado.
+
+Vale o alerta geral: um `success_rate` de 100% com `caldera_validated: false` não
+é contradição — é a emulação dizendo "rodei tudo que consegui, e nada disso era
+o seu problema".
+
+### Por que o ID MITRE é extraído com regex
+
+`technique` no `event_chain` vem de um LLM. O prompt pede só o identificador e
+agora exige também `technique_parent`, mas instrução não é contrato: um
+`"T1059 - Command and Scripting"` era usado verbatim, não casava com ability
+nenhuma e a emulação rodava zero técnicas **sem erro algum**. `_tecnicas_da_cadeia`
+extrai o ID com `\bT\d{4}(?:\.\d{3})?\b` e usa `technique_parent` só como
+resgate — somá-lo à lista faria o casamento parecer exato e apagaria a distinção
+acima.
+
+---
+
 ## 14. Por que o Caldera tem um agente, e não vinte
 
 O Caldera precisa de um alvo. Sem nenhum agente registrado, a operação termina
@@ -994,6 +1045,42 @@ RAM, então o servidor perde a lista e recria o registro no primeiro beacon — 
 o mesmo PAW, continua sendo um só. E o `restart: unless-stopped` fica onde está,
 porque continua sendo ele quem garante a reconexão; o que mudou é que reiniciar
 deixou de ter custo.
+
+### A segunda fonte: uma ability que instala agentes
+
+A explicação acima estava certa e **incompleta**. Em 2026-08-02, com o `-paw`
+fixo em vigor e o container do agente intocado, os vinte agentes voltaram em dez
+minutos.
+
+A fonte era a ability **"Start 54ndc47"** (`T1059.004`, plugin `stockpile`),
+cujo executor linux é literalmente:
+
+```
+nohup ./sandcat.go -server #{server} &      payload: sandcat.go
+```
+
+Ela inicia um agente novo. E como uma operação executa cada ability em **todos**
+os agentes do grupo, o laço se fecha sozinho: executa → nasce um agente → o
+agente entra no grupo `red` → o planner atribui a mesma ability a ele → executa
+de novo. A operação chegou a 43 elos e nunca finalizou; o cliente desistiu no
+timeout de 600s enquanto o container continuava gerando processos.
+
+Ela estava no catálogo desde sempre, inofensiva por falta de alcance: nada
+mapeava para `T1059` até o fallback de técnica-pai passar a mapear.
+
+**O filtro.** `_implanta_agente` descarta abilities cujo comando ou payload
+referencia o binário do agente (`sandcat` ou `54ndc47`, as duas grafias que o
+Stockpile usa) e roda **antes** do filtro de credencial — porque credencial
+faltando só faz a ability falhar, enquanto esta multiplica o trabalho sem limite.
+
+São 5 abilities de 70 linux no catálogo padrão: `Start 54ndc47`,
+`Start 54ndc47 (2)`, `Sandcat`, `Copy 54ndc47` e `Weak executable files`. A
+última merece nota: o comando dela parece uma busca inofensiva
+(`find / -perm -333 …`), e o que ela faz é anexar um lançador do sandcat a todo
+executável gravável que encontrar. É o payload, não o comando, que a entrega.
+
+Perder essas cinco é ganho, não perda. Emular implantação de agente não diz nada
+sobre o achado do scan — prova apenas que o Caldera consegue instalar o Caldera.
 
 ### O que não resolve, e por quê
 

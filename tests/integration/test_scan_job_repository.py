@@ -71,12 +71,48 @@ def test_save_and_get_by_commit(session):
 
 
 def test_save_is_idempotent_on_commit(session):
+    """Dois disparos simultâneos do mesmo commit não geram dois pipelines.
+
+    Quem garante isso agora é o índice unique PARCIAL
+    (``uq_scan_jobs_commit_em_andamento``), não mais um UNIQUE em ``commit_sha``:
+    o primeiro job fica ``tier1_status=running``, então o segundo cai no
+    predicado "em andamento" e o ON CONFLICT DO NOTHING o descarta. A linha que
+    sobrevive é a PRIMEIRA — DO NOTHING, não sobrescrita.
+    """
     repo = SQLAlchemyScanJobRepository(session)
-    repo.save(_make_job())
+    primeiro = _make_job(tier1_status=TierStatus.RUNNING)
+    repo.save(primeiro)
     session.commit()
-    repo.save(_make_job())  # mesmo commit_sha — ON CONFLICT DO NOTHING
+    repo.save(_make_job(tier1_status=TierStatus.RUNNING))
     session.commit()
+
     assert repo.count() == 1
+    assert repo.get_by_commit("a" * 40).id == primeiro.id
+
+
+def test_save_permite_nova_execucao_quando_a_anterior_encerrou(session):
+    """O índice parcial só cobre execuções vivas — encerradas não conflitam.
+
+    É exatamente essa brecha que dá origem ao histórico: rescanear o mesmo
+    commit empilha uma linha em vez de reescrever a anterior.
+    """
+    repo = SQLAlchemyScanJobRepository(session)
+    encerrada = _make_job(
+        tier1_status=TierStatus.DONE,
+        tier1_started_at=datetime(2026, 8, 1, 10, 0),
+        tier2_status=TierStatus.DONE,
+    )
+    repo.save(encerrada)
+    session.commit()
+
+    nova = _make_job(
+        tier1_status=TierStatus.RUNNING, tier1_started_at=datetime(2026, 8, 1, 12, 0)
+    )
+    repo.save(nova)
+    session.commit()
+
+    assert repo.count() == 2
+    assert repo.get_by_commit("a" * 40).id == nova.id  # a corrente é a mais recente
 
 
 def test_update_tier_status_sets_timestamps(session):
@@ -159,40 +195,108 @@ def test_fail_pending_tiers_preserva_tiers_concluidos(session):
     assert job.tier3_status is None  # tier que nunca rodou continua vazio
 
 
-def test_restart_execution_zera_a_execucao_anterior(session):
-    repo = SQLAlchemyScanJobRepository(session)
-    criado_em = datetime(2026, 7, 31, 5, 30)
-    repo.save(
-        _make_job(
-            "a" * 40,
-            created_at=criado_em,
-            tier1_status=TierStatus.DONE,
-            tier1_started_at=criado_em,
-            tier1_completed_at=datetime(2026, 8, 1, 3, 39),
-            tier2_status=TierStatus.FAILED,
-            tier2_started_at=datetime(2026, 8, 1, 3, 39),
-            tier3_status=TierStatus.SKIPPED,
-            blocked_at_tier=ScanTier.TWO,
-            final_risk_score=80,
-            final_risk_level="high",
-        )
+def _execucao_encerrada() -> ScanJob:
+    """Uma execução com desfecho completo, usada como "a execução anterior"."""
+    return _make_job(
+        "a" * 40,
+        created_at=datetime(2026, 7, 31, 5, 30),
+        tier1_status=TierStatus.DONE,
+        tier1_started_at=datetime(2026, 7, 31, 5, 30),
+        tier1_completed_at=datetime(2026, 8, 1, 3, 39),
+        tier2_status=TierStatus.FAILED,
+        tier2_started_at=datetime(2026, 8, 1, 3, 39),
+        tier3_status=TierStatus.SKIPPED,
+        blocked_at_tier=ScanTier.TWO,
+        final_risk_score=80,
+        final_risk_level="high",
     )
+
+
+def test_redisparo_empilha_execucao_preservando_a_anterior(session):
+    """Rescanear o mesmo commit cria uma linha NOVA e não toca na antiga.
+
+    Substitui o antigo ``restart_execution``, que zerava a linha existente
+    porque havia UNIQUE em ``commit_sha`` — o resultado anterior era destruído.
+    """
+    repo = SQLAlchemyScanJobRepository(session)
+    anterior = _execucao_encerrada()
+    repo.save(anterior)
     session.commit()
 
     novo_inicio = datetime(2026, 8, 1, 10, 0)
-    repo.restart_execution("a" * 40, started_at=novo_inicio)
+    nova = _make_job(
+        "a" * 40,
+        created_at=novo_inicio,
+        tier1_status=TierStatus.RUNNING,
+        tier1_started_at=novo_inicio,
+    )
+    repo.save(nova)
     session.commit()
 
-    job = repo.get_by_commit("a" * 40)
-    assert job.tier1_status == TierStatus.RUNNING
-    assert job.tier1_started_at == novo_inicio
-    assert job.tier1_completed_at is None
-    assert job.tier2_status is None and job.tier2_started_at is None
-    assert job.tier3_status is None
-    assert job.blocked_at_tier is None
-    assert job.final_risk_score is None and job.final_risk_level is None
-    # created_at é a entrada do commit no sistema — não muda no redisparo.
-    assert job.created_at == criado_em
+    assert repo.count() == 2
+
+    # a execução corrente é a nova, em branco
+    corrente = repo.get_by_commit("a" * 40)
+    assert corrente.id == nova.id
+    assert corrente.tier1_status == TierStatus.RUNNING
+    assert corrente.tier1_started_at == novo_inicio
+    assert corrente.tier1_completed_at is None
+    assert corrente.tier2_status is None and corrente.tier3_status is None
+    assert corrente.blocked_at_tier is None
+    assert corrente.final_risk_score is None and corrente.final_risk_level is None
+    # created_at agora é o início DESTA execução (não há mais o que preservar)
+    assert corrente.created_at == novo_inicio
+
+    # a anterior sobrevive intacta: statuses, timestamps e risco
+    velha = repo.get_by_id(anterior.id)
+    assert velha.tier1_status == TierStatus.DONE
+    assert velha.tier1_started_at == datetime(2026, 7, 31, 5, 30)
+    assert velha.tier1_completed_at == datetime(2026, 8, 1, 3, 39)
+    assert velha.tier2_status == TierStatus.FAILED
+    assert velha.tier2_started_at == datetime(2026, 8, 1, 3, 39)
+    assert velha.tier3_status == TierStatus.SKIPPED
+    assert velha.blocked_at_tier == ScanTier.TWO
+    assert velha.final_risk_score == 80 and velha.final_risk_level == "high"
+    assert velha.created_at == datetime(2026, 7, 31, 5, 30)
+
+    # e o histórico vem da mais recente para a mais antiga
+    assert [j.id for j in repo.list_by_commit("a" * 40)] == [nova.id, anterior.id]
+
+
+def test_writes_atingem_apenas_a_execucao_corrente(session):
+    """As tasks Celery só conhecem o ``commit_sha``.
+
+    Com histórico, um ``WHERE commit_sha = X`` reescreveria TODAS as execuções
+    de uma vez; os writes resolvem para a execução corrente antes de atualizar.
+    """
+    repo = SQLAlchemyScanJobRepository(session)
+    anterior = _execucao_encerrada()
+    repo.save(anterior)
+    session.commit()
+
+    nova = _make_job(
+        "a" * 40,
+        created_at=datetime(2026, 8, 1, 10, 0),
+        tier1_status=TierStatus.RUNNING,
+        tier1_started_at=datetime(2026, 8, 1, 10, 0),
+    )
+    repo.save(nova)
+    session.commit()
+
+    repo.update_tier_status("a" * 40, ScanTier.TWO, TierStatus.DONE)
+    repo.set_blocked("a" * 40, ScanTier.THREE)
+    repo.set_final_risk("a" * 40, 20, "low")
+    session.commit()
+
+    corrente = repo.get_by_id(nova.id)
+    assert corrente.tier2_status == TierStatus.DONE
+    assert corrente.blocked_at_tier == ScanTier.THREE
+    assert corrente.final_risk_score == 20
+
+    velha = repo.get_by_id(anterior.id)
+    assert velha.tier2_status == TierStatus.FAILED
+    assert velha.blocked_at_tier == ScanTier.TWO
+    assert velha.final_risk_score == 80
 
 
 def test_list_recent_and_count(session):

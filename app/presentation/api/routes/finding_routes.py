@@ -22,6 +22,8 @@ from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
 from app.presentation.api.dependencies.auth import get_current_user
 from app.presentation.schemas.finding_schema import (
     FindingDetail,
+    FindingGroupList,
+    FindingGroupResponse,
     FindingPage,
     FindingResponse,
     FindingSeverity,
@@ -62,6 +64,13 @@ def list_findings(
     tier: int | None = Query(None, ge=1, le=3, description="Filtra pelo tier (1-3)."),
     source: str | None = Query(None, description="Filtra pela ferramenta de origem (ex.: semgrep)."),
     secret_verified: bool | None = Query(None, description="Filtra secrets verificados."),
+    title: str | None = Query(
+        None,
+        description=(
+            "Filtra pelo titulo EXATO. E o drill-down de um grupo de "
+            "`GET /findings/groups` — nao e busca por texto livre."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=200, description="Tamanho da pagina."),
     offset: int = Query(0, ge=0, description="Deslocamento para paginacao."),
 ) -> FindingPage:
@@ -80,6 +89,7 @@ def list_findings(
         tier=tier,
         source=source,
         secret_verified=secret_verified,
+        title=title,
         user_id=user_id,
         limit=limit,
         offset=offset,
@@ -90,6 +100,7 @@ def list_findings(
         tier=tier,
         source=source,
         secret_verified=secret_verified,
+        title=title,
         user_id=user_id,
     )
     return FindingPage(
@@ -97,6 +108,45 @@ def list_findings(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/groups",
+    response_model=FindingGroupList,
+    summary="Listar findings agrupados por tipo",
+    response_description="Tipos de vulnerabilidade com a contagem de ocorrencias.",
+)
+def list_finding_groups(
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+    commit_sha: str | None = Query(None, description="Filtra pelo SHA do commit."),
+    amostra: int = Query(
+        8, ge=0, le=50, description="Quantos caminhos de exemplo trazer por grupo."
+    ),
+) -> FindingGroupList:
+    """
+    Agrupa os findings do usuario por tipo de vulnerabilidade.
+
+    Existe porque a listagem plana e' ilegivel com DAST: o mesmo alerta do ZAP
+    aparece uma vez por rota, e um scan vira milhares de linhas que sao dezenas
+    de problemas. Aqui cada linha e' um problema, com quantas vezes ele ocorre e
+    em quantos caminhos distintos.
+
+    Sem paginacao de proposito: o agrupamento derruba a cardinalidade em tres
+    ordens de grandeza (12 mil findings -> 14 grupos), entao a resposta inteira
+    cabe numa tela. O teto de 500 grupos e' so uma trava de seguranca.
+
+    Para as ocorrencias de um grupo, use `GET /findings?title=<titulo exato>`.
+    """
+    teto = 500
+    grupos = SQLAlchemyFindingRepository(db).group_by_type(
+        commit_sha=commit_sha, user_id=user_id, amostra_por_grupo=amostra, limit=teto
+    )
+    return FindingGroupList(
+        items=[FindingGroupResponse.from_group(g) for g in grupos],
+        total_findings=sum(g.ocorrencias for g in grupos),
+        truncado=len(grupos) >= teto,
     )
 
 

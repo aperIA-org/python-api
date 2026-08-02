@@ -3,13 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app.domain.scan.entities import STATUS_EM_ANDAMENTO, ScanJob
 from app.domain.scan.repositories import ScanJobRepository
 from app.domain.scan.value_objects import ScanTier, TierStatus
-from app.infrastructure.persistence.models.scan_job_model import ScanJobModel
+from app.infrastructure.persistence.models.scan_job_model import (
+    EM_ANDAMENTO_SQL,
+    ScanJobModel,
+)
 
 
 _TIER_PREFIX = {
@@ -24,6 +27,36 @@ _INSERT_COLUMNS = tuple(ScanJobModel.__table__.columns.keys())
 _VALORES_EM_ANDAMENTO = tuple(status.value for status in STATUS_EM_ANDAMENTO)
 
 _TIER_PREFIXES = ("tier1", "tier2", "tier3")
+
+
+# Quando a execução rodou. ``created_at`` marca a entrada do commit no sistema
+# e é copiado nas reexecuções, então não serve para ordenar histórico.
+_EXECUTADO_EM = func.coalesce(ScanJobModel.tier1_started_at, ScanJobModel.created_at)
+
+
+def _id_execucao_corrente(commit_sha: str):
+    """Subquery com o id da execução corrente daquele commit.
+
+    Nenhuma task Celery conhece o id da execução — o canvas só carrega o
+    ``commit_sha``. Enquanto havia uma linha por commit isso bastava; com
+    histórico, um ``WHERE commit_sha = X`` atingiria TODAS as execuções de uma
+    vez e reescreveria o passado. Aqui o alvo é sempre uma linha: a execução
+    mais recente daquele commit, que é necessariamente a que está rodando — o
+    índice unique parcial impede duas vivas ao mesmo tempo e uma nova só nasce
+    depois que a anterior encerra.
+
+    Ressalva conhecida: se um redisparo acontecer no intervalo entre o último
+    tier encerrar e uma task atrasada da execução anterior escrever, a escrita
+    atrasada cai na execução nova. Fechar isso exige levar o id da execução no
+    canvas (ver docs/pendencias.md).
+    """
+    return (
+        select(ScanJobModel.id)
+        .where(ScanJobModel.commit_sha == commit_sha)
+        .order_by(_EXECUTADO_EM.desc(), ScanJobModel.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
 
 
 def _to_row(job: ScanJob) -> dict:
@@ -46,8 +79,11 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         if dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+            # Alvo é o índice unique PARCIAL: só conflita com uma execução do
+            # mesmo commit que ainda esteja em andamento. Uma execução encerrada
+            # não impede a próxima — é isso que cria o histórico.
             stmt = pg_insert(ScanJobModel).values(row).on_conflict_do_nothing(
-                constraint="scan_jobs_commit_sha_key"
+                index_elements=["commit_sha"], index_where=text(EM_ANDAMENTO_SQL)
             )
             self.db.execute(stmt)
             return
@@ -56,7 +92,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
             from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
             stmt = sqlite_insert(ScanJobModel).values(row).on_conflict_do_nothing(
-                index_elements=["commit_sha"]
+                index_elements=["commit_sha"], index_where=text(EM_ANDAMENTO_SQL)
             )
             self.db.execute(stmt)
             return
@@ -78,11 +114,29 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         return model.to_entity() if model else None
 
     def get_by_commit(self, commit_sha: str) -> ScanJob | None:
+        """A execução **mais recente** daquele commit.
+
+        Com histórico o commit deixou de ter uma linha só; quem pergunta "como
+        está o commit X" quer o estado corrente, e é isso que volta aqui. Para o
+        histórico inteiro, ``list_by_commit``.
+        """
         result = self.db.execute(
-            select(ScanJobModel).where(ScanJobModel.commit_sha == commit_sha)
+            select(ScanJobModel)
+            .where(ScanJobModel.commit_sha == commit_sha)
+            .order_by(_EXECUTADO_EM.desc(), ScanJobModel.id.desc())
+            .limit(1)
         )
         model = result.scalars().first()
         return model.to_entity() if model else None
+
+    def list_by_commit(self, commit_sha: str) -> list[ScanJob]:
+        """Todas as execuções daquele commit, da mais recente para a mais antiga."""
+        result = self.db.execute(
+            select(ScanJobModel)
+            .where(ScanJobModel.commit_sha == commit_sha)
+            .order_by(_EXECUTADO_EM.desc(), ScanJobModel.id.desc())
+        )
+        return [m.to_entity() for m in result.scalars().all()]
 
     def update_tier_status(
         self, commit_sha: str, tier: ScanTier, status: TierStatus
@@ -96,7 +150,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
 
         self.db.execute(
             update(ScanJobModel)
-            .where(ScanJobModel.commit_sha == commit_sha)
+            .where(ScanJobModel.id == _id_execucao_corrente(commit_sha))
             .values(**values)
         )
         self.db.flush()
@@ -104,7 +158,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
     def set_blocked(self, commit_sha: str, blocked_at: ScanTier) -> None:
         self.db.execute(
             update(ScanJobModel)
-            .where(ScanJobModel.commit_sha == commit_sha)
+            .where(ScanJobModel.id == _id_execucao_corrente(commit_sha))
             .values(blocked_at_tier=blocked_at.value)
         )
         self.db.flush()
@@ -112,7 +166,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
     def set_final_risk(self, commit_sha: str, score: int | None, level: str | None) -> None:
         self.db.execute(
             update(ScanJobModel)
-            .where(ScanJobModel.commit_sha == commit_sha)
+            .where(ScanJobModel.id == _id_execucao_corrente(commit_sha))
             .values(final_risk_score=score, final_risk_level=level)
         )
         self.db.flush()
@@ -152,47 +206,15 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
 
         self.db.execute(
             update(ScanJobModel)
-            .where(ScanJobModel.commit_sha == commit_sha)
+            .where(ScanJobModel.id == _id_execucao_corrente(commit_sha))
             .values(**values)
         )
         self.db.flush()
 
-    def restart_execution(self, commit_sha: str, *, started_at: datetime) -> None:
-        # Zera tudo que descreve a execução anterior e recoloca o Tier 1 em
-        # "running" — o mesmo estado com que a linha nasceria se fosse nova.
-        # ``created_at`` NÃO é tocado: ele marca quando o commit entrou no
-        # sistema pela primeira vez.
-        self.db.execute(
-            update(ScanJobModel)
-            .where(ScanJobModel.commit_sha == commit_sha)
-            .values(
-                tier1_status=TierStatus.RUNNING.value,
-                tier1_started_at=started_at,
-                tier1_completed_at=None,
-                tier2_status=None,
-                tier2_started_at=None,
-                tier2_completed_at=None,
-                tier3_status=None,
-                tier3_started_at=None,
-                tier3_completed_at=None,
-                blocked_at_tier=None,
-                final_risk_score=None,
-                final_risk_level=None,
-            )
-        )
-        self.db.flush()
-
-    # Ordenar por ``created_at`` afundaria uma reexecução: ``restart_execution``
-    # preserva o ``created_at`` (entrada do commit no sistema) e só reseta os
-    # timestamps de tier, então rescanear um commit antigo o deixava no fim da
-    # lista mesmo tendo acabado de rodar. O COALESCE cobre jobs enfileirados que
-    # ainda não iniciaram o Tier 1.
-    _EXECUTADO_EM = func.coalesce(ScanJobModel.tier1_started_at, ScanJobModel.created_at)
-
     def list_recent(self, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
         result = self.db.execute(
             select(ScanJobModel)
-            .order_by(self._EXECUTADO_EM.desc())
+            .order_by(_EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -206,7 +228,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         result = self.db.execute(
             select(ScanJobModel)
             .where(ScanJobModel.user_id == user_id)
-            .order_by(self._EXECUTADO_EM.desc())
+            .order_by(_EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -226,7 +248,7 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         result = self.db.execute(
             select(ScanJobModel)
             .where(ScanJobModel.repository_id == repository_id)
-            .order_by(self._EXECUTADO_EM.desc())
+            .order_by(_EXECUTADO_EM.desc())
             .limit(limit)
             .offset(offset)
         )

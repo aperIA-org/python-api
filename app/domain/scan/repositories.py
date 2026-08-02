@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
 from uuid import UUID
 
 from app.domain.scan.entities import ScanJob
@@ -61,12 +60,11 @@ class ScanJobRepository(ABC):
         ...
 
     @abstractmethod
-    def restart_execution(self, commit_sha: str, *, started_at: datetime) -> None:
-        """Reinicia o estado de execução de uma linha já existente.
+    def list_by_commit(self, commit_sha: str) -> list[ScanJob]:
+        """Todas as execuções daquele commit, da mais recente para a mais antiga.
 
-        Existe porque ``scan_jobs`` tem UNIQUE em ``commit_sha``: um redisparo
-        do mesmo commit reaproveita a linha. Sem reset, os timestamps da
-        execução anterior sobrevivem e a duração exibida vira ficção.
+        Substitui o antigo ``restart_execution``: rescanear não reescreve mais a
+        linha anterior, empilha uma nova. O histórico é o resultado disso.
         """
         ...
 

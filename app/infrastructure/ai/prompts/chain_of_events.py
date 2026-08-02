@@ -29,13 +29,15 @@ REGRAS INVIOLÁVEIS:
 3. Se o bloco "Dados Caldera" disser "sem dados de emulação Caldera disponíveis", retorne "caldera_status": "unavailable" e NÃO afirme se a exploração teve sucesso.
 4. Quando não houver findings suficientes para uma cadeia plausível, retorne event_chain vazio e attack_narrative explicando o motivo.
 5. Responda em PORTUGUÊS BRASILEIRO no campo attack_narrative.
+6. Em "technique" e "technique_parent" escreva SOMENTE o identificador (ex.: "T1059.007", "T1059") — sem nome da técnica, sem parênteses, sem texto em volta. O campo é consumido por máquina: qualquer texto extra faz a emulação não encontrar a técnica.
 
 Formato de saída — JSON estritamente neste schema, sem markdown fences:
 {
   "event_chain": [
     {
       "step": <int>,
-      "technique": "<TXXXX ou null>",
+      "technique": "<TXXXX ou TXXXX.YYY, o ID MITRE MAIS ESPECIFICO que a evidencia sustenta, ou null>",
+      "technique_parent": "<TXXXX, a tecnica-pai de technique; igual a technique quando ela ja for pai; null se technique for null>",
       "description": "<string curta>",
       "finding_ids": ["<uuid|título>", ...]
     }

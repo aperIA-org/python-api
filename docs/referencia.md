@@ -16,12 +16,14 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 | `POST` | `/auth/login` | Autentica e retorna `access_token` (15 min) + `refresh_token` (7 dias). | — |
 | `POST` | `/auth/refresh` | Troca um `refresh_token` válido por novo par (rotação); reuso detectado invalida a família. | — |
 | `POST` | `/auth/logout` | Invalida o `refresh_token` fornecido. Sempre `204` (evita oracle). | — |
-| `GET` | `/findings` | Lista findings do usuário logado (filtros `commit_sha`/`severity`/`tier`/`source`/`secret_verified` + paginação). Omite `raw_output`. | JWT |
+| `GET` | `/findings` | Lista findings do usuário logado (filtros `commit_sha`/`severity`/`tier`/`source`/`secret_verified`/`title` + paginação). Omite `raw_output`. `title` é **igualdade exata** — é o drill-down de um grupo, não busca livre. | JWT |
+| `GET` | `/findings/groups` | Findings agrupados por tipo (`source`+`severity`+`tier`+`title`+`asset`), com `ocorrencias`, `caminhos` distintos, intervalo de datas e uma `amostra` de caminhos. Sem paginação: o agrupamento derruba a cardinalidade em três ordens de grandeza. Declarada **antes** de `/findings/{finding_id}`, senão `groups` seria capturado como uuid. | JWT |
 | `GET` | `/findings/{finding_id}` | Detalhe de um finding, incluindo `raw_output`. 404 se não pertencer ao usuário. | JWT |
 | `GET` | `/scans` | Lista scans do usuário logado, paginados. Ordenado por **`COALESCE(tier1_started_at, created_at)` desc** — ou seja, pela execução mais recente, não pela entrada do commit: reescanear um commit antigo preserva o `created_at` e o job ficaria no fim da lista. | JWT |
-| `GET` | `/scans/{commit_sha}` | Status de um scan por `commit_sha`, com `findings_summary`. | JWT |
-| `GET` | `/scans/{commit_sha}/report` | Relatórios (um por tier) de um commit. Lista vazia se o pipeline ainda não gerou nenhum. | JWT |
-| `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório de um tier específico (1-3) de um commit. | JWT |
+| `GET` | `/scans/{scan_id}` | Status de uma execução, com `findings_summary`. `scan_id` aceita o **uuid da execução** ou um **commit sha** (resolve para a execução *corrente* daquele commit). | JWT |
+| `GET` | `/scans/{scan_id}/report` | Relatórios (um por tier) **daquela execução**. Lista vazia se o pipeline ainda não gerou nenhum. | JWT |
+| `GET` | `/scans/{scan_id}/tiers/{tier}/report` | Relatório de um tier específico (1-3) daquela execução. | JWT |
+| `GET` | `/scans/{scan_id}/history` | Todas as execuções do mesmo commit, da mais recente para a mais antiga (inclui a consultada). | JWT |
 | `GET` | `/github/connect` | Gera `install_url` do GitHub App com `state` assinado (10 min). Retorna 503 se `GITHUB_APP_SLUG` vazio. | JWT |
 | `GET` | `/github/callback` | Recebe o redirect pós-instalação (`installation_id` + `state` + `setup_action`); vincula a instalação ao usuário via `state` assinado (não via header). Upsert de `GithubAccount`. Com `GITHUB_CONNECT_REDIRECT_URL` configurada responde `302` (inclusive em erro de `state`, com `github=erro&motivo=state`); sem ela, JSON no sucesso e `400` no erro. | — |
 | `GET` | `/github/repos` | Lista, ao vivo, os repositórios visíveis pelas instalações do usuário; marca `active` nos já ativados. Traz também `private`, `language` e `pushed_at`, lidos do próprio payload da instalação. | JWT |
@@ -134,13 +136,30 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `repository_id` | `UUID \| None` | `Repository` que originou o scan; nullable p/ scans legados. |
 | `created_at` | `datetime` | `default_factory=datetime.utcnow`. |
 
-**UNIQUE:** `scan_jobs_commit_sha_key` em `commit_sha`. Como a chave é o commit,
-um **redisparo do mesmo commit reaproveita a linha**: `create_scan_job` detecta
-que ela já existe e chama `restart_execution`, zerando `tier*_status`,
-`tier*_started_at`, `tier*_completed_at`, `blocked_at_tier`, `final_risk_score` e
-`final_risk_level`. `created_at` é preservado — ele marca quando o commit entrou
-no sistema pela primeira vez, e a duração de uma execução deve ser lida a partir
-dos `tier*_started_at`, que são sempre da execução corrente.
+**Uma linha = uma EXECUÇÃO, não um commit.** Redisparar o mesmo commit (rescan
+da mesma branch, novo push com o mesmo HEAD, retry) **empilha uma linha nova** e
+preserva a anterior — é o que dá histórico de relatórios. `id` é a identidade da
+execução; `commit_sha` sozinho não identifica mais um scan.
+
+**UNIQUE:** índice parcial `uq_scan_jobs_commit_em_andamento` em `commit_sha`,
+com predicado "algum tier em `queued`/`running`". Ou seja: **no máximo uma
+execução em andamento por commit**, quantas encerradas quiser. Isso preserva a
+idempotência que o antigo `UNIQUE(commit_sha)` garantia (dois webhooks do mesmo
+push não geram dois pipelines, via `ON CONFLICT DO NOTHING`) sem impedir o
+histórico. O método `restart_execution` deixou de existir.
+
+**Como os workers acham a execução certa:** o canvas Celery só carrega
+`commit_sha` — nenhuma task conhece o id da execução. O repositório resolve isso
+com a subquery `_id_execucao_corrente(commit_sha)` (a execução mais recente
+daquele commit), usada no `WHERE` de `update_tier_status`, `set_blocked`,
+`set_final_risk` e `fail_pending_tiers`. É unívoco porque o índice parcial impede
+duas execuções vivas ao mesmo tempo e uma nova só nasce depois que a anterior
+encerra. *Ressalva:* um redisparo no intervalo entre o último tier encerrar e uma
+task atrasada escrever faria a escrita atrasada cair na execução nova — fechar
+isso exige levar o id da execução no canvas (ver `pendencias.md`).
+
+`created_at` passou a ser o início desta execução (antes era preservado da
+primeira vez que o commit entrou no sistema).
 
 Métodos do domínio (`ScanJob`):
 
@@ -204,7 +223,14 @@ complementares, ambos usando `SCAN_STALE_AFTER_MINUTES`:
 Em ambos os casos só os tiers pendentes viram `failed`; tiers já `done`/`skipped`
 ficam intactos.
 
-> Tabela relacionada `scan_reports` (não é entidade de domínio própria, é o relatório markdown por tier/commit): **UNIQUE** `scan_reports_commit_tier_key` em `(commit_sha, tier)`.
+> Tabela relacionada `scan_reports` (não é entidade de domínio própria, é o
+> relatório markdown por tier): pertence à **execução**, não ao commit —
+> `scan_job_id` é NOT NULL com FK para `scan_jobs.id` `ON DELETE CASCADE`, e a
+> **UNIQUE** é `scan_reports_job_tier_key` em `(scan_job_id, tier)`. Era
+> `(commit_sha, tier)`, e por isso rescanear a mesma branch fazia o upsert
+> sobrescrever o relatório anterior. O upsert continua existindo, mas agora só
+> cobre replay do canvas *dentro da mesma execução*. `commit_sha` segue na
+> tabela como atalho de leitura (índice `idx_scan_reports_commit_sha`).
 
 ### `Repository` (`app/domain/github/entities.py`) — tabela `repositories`
 

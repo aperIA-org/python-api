@@ -6,8 +6,10 @@ PR. Mesmo racional dos demais writers: escrita gated por
 falha de banco é logada mas NUNCA interrompe o pipeline (o relatório já foi
 postado no PR; o banco é só a projeção consumível via API).
 
-Idempotente: o ``save`` do repositório faz ON CONFLICT (commit_sha, tier)
-DO UPDATE — um replay do canvas (acks_late) substitui o relatório.
+Idempotente: o ``save`` do repositório faz ON CONFLICT (scan_job_id, tier)
+DO UPDATE — um replay do canvas (acks_late) substitui o relatório DAQUELA
+execução. Uma reexecução do mesmo commit grava uma linha nova, preservando o
+relatório anterior.
 """
 from __future__ import annotations
 
@@ -43,13 +45,21 @@ def persist_report(
         return
     try:
         with SessionLocal() as db:
-            # Vincula ao ScanJob do commit, se existir (best-effort).
+            # A execução corrente daquele commit é a dona do relatório. Sem ela
+            # não há onde pendurar a linha (``scan_job_id`` é NOT NULL desde que
+            # o relatório passou a pertencer à execução, não ao commit) — e um
+            # relatório órfão não seria alcançável por rota nenhuma.
             job = SQLAlchemyScanJobRepository(db).get_by_commit(commit_sha)
+            if job is None:
+                logger.warning(
+                    "scan_report_sem_execucao", commit_sha=commit_sha, tier=tier
+                )
+                return
             report = ScanReport(
                 commit_sha=commit_sha,
                 tier=tier,
                 report_markdown=report_markdown,
-                scan_job_id=job.id if job else None,
+                scan_job_id=job.id,
                 analysis_json=analysis_json or {},
                 degraded=degraded,
                 comment_id=comment_id,

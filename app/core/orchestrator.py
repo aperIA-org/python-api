@@ -29,6 +29,7 @@ re-execução em caso de crash.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -53,18 +54,38 @@ logger = structlog.get_logger()
 # uma é JSON-serializável e idempotente.
 
 
+#: `T1059` ou `T1059.007`. O valor vem de um LLM, então extrair com regex em vez
+#: de confiar no formato: `"T1059 - Command and Scripting"` era aceito inteiro e
+#: não casava com ability nenhuma — zero abilities sem nenhum erro visível.
+_MITRE_ID = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+
+
+def _id_mitre(valor: Any) -> str | None:
+    achado = _MITRE_ID.search(str(valor or "").upper())
+    return achado.group(0) if achado else None
+
+
 def _tecnicas_da_cadeia(tier2_analysis: dict[str, Any]) -> list[str]:
     """Extrai os IDs MITRE do `event_chain`, sem repetir e na ordem dos passos.
 
-    O schema do Tier 2 define `technique` como `"<TXXXX ou null>"`, então
-    passos sem técnica identificada são normais e simplesmente não entram.
+    O schema do Tier 2 define `technique` como opcional, então passos sem
+    técnica identificada são normais e simplesmente não entram.
+
+    Preferimos sempre a técnica MAIS específica: é ela que descreve o achado, e
+    é contra ela que `caldera_validated` faz sentido. O `technique_parent` só
+    entra como resgate, quando `technique` vem vazia ou ilegível — ele **não** é
+    somado à lista, porque pedir o pai explicitamente faria o casamento parecer
+    exato e apagaria a distinção entre "emulei o seu problema" e "emulei um
+    parente dele" (ver `MapeamentoAbilities`).
     """
     tecnicas: list[str] = []
     for passo in tier2_analysis.get("event_chain", []) or []:
         if not isinstance(passo, dict):
             continue
-        tecnica = str(passo.get("technique") or "").strip().upper()
-        if tecnica and tecnica != "NULL" and tecnica not in tecnicas:
+        tecnica = _id_mitre(passo.get("technique")) or _id_mitre(
+            passo.get("technique_parent")
+        )
+        if tecnica and tecnica not in tecnicas:
             tecnicas.append(tecnica)
     return tecnicas
 

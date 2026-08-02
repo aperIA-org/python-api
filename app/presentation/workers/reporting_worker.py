@@ -147,6 +147,8 @@ REGRAS:
 1. Reflita EXATAMENTE os campos fornecidos. NÃO infira conclusões adicionais.
 2. Se "cti_status" == "unavailable", NÃO mencione campanhas, atores ou grupos.
 3. Se "caldera_status" == "unavailable", NÃO afirme exploração bem-sucedida.
+   O mesmo vale quando "validacao_parcial" for true: a emulação executou uma
+   técnica da MESMA FAMÍLIA da encontrada, não ela. Trate como não validado.
 4. Para CADA passo do attack_path, mostre fase + TTP MITRE + descrição + se foi validado pelo Caldera.
 5. Liste as prioritized_actions em ordem (1, 2, 3...).
 6. Tom: técnico, direto, acionável; máximo 40 linhas de markdown.
@@ -198,6 +200,22 @@ def _fallback_t3_markdown(analysis: dict[str, Any]) -> str:
         lines.append(
             f"**Caldera success_rate:** {caldera.get('success_rate', 0.0):.0%}"
         )
+        # `success_rate` sozinho engana quando a emulação rodou uma técnica da
+        # mesma família, e não a encontrada: 100% de sucesso emulando o primo
+        # do problema não valida o problema.
+        if caldera.get("validacao_parcial"):
+            familias = ", ".join(map(str, caldera.get("tecnicas_por_pai") or []))
+            lines.append(
+                "**Validação parcial:** as abilities executadas cobrem a família "
+                f"das técnicas {familias}, não as sub-técnicas encontradas — "
+                "o achado NÃO foi validado por emulação."
+            )
+        sem_cobertura = caldera.get("tecnicas_sem_cobertura") or []
+        if sem_cobertura:
+            lines.append(
+                "**Sem cobertura no catálogo:** "
+                f"{', '.join(map(str, sem_cobertura))}."
+            )
     return "\n".join(lines)
 
 

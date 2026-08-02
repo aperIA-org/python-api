@@ -11,7 +11,8 @@ Retorna dict agregado **JSON-safe**:
         "findings": [<zap findings serializados>],
         "cti_data": {"active_threat": bool, "mitre_techniques": [...]}
                     ou {} se nenhum CVE foi enriquecido,
-        "caldera_results": {"status": "ok"|"failed", "success_rate": …}
+        "caldera_results": {"status": "reachable"|"failed", "success_rate": …,
+                            "caldera_validated": bool, "validacao_parcial": bool}
     }
 
 Por que sequencial: T3 não está no caminho crítico (30-60 min).
@@ -174,6 +175,9 @@ def run_tier3_scan(
             "techniques_successful": 0,
             "ttps_used": [],
             "caldera_validated": False,
+            "validacao_parcial": False,
+            "tecnicas_por_pai": [],
+            "tecnicas_sem_cobertura": [],
         }
 
     logger.info(
@@ -183,6 +187,8 @@ def run_tier3_scan(
         cve_count=len(cves),
         cti_status="available" if cti_merged else "unavailable",
         caldera_status=caldera_results.get("status"),
+        caldera_validado=caldera_results.get("caldera_validated"),
+        caldera_parcial=caldera_results.get("validacao_parcial"),
     )
 
     return {

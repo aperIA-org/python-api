@@ -2,12 +2,13 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Index,
     Integer,
     SmallInteger,
     String,
     Text,
-    UniqueConstraint,
     Uuid,
+    text,
 )
 
 from app.domain.scan.entities import ScanJob
@@ -15,11 +16,39 @@ from app.domain.scan.value_objects import ScanTier, TierStatus
 from app.infrastructure.persistence.models.base import Base
 
 
+# Versão SQL de ``STATUS_EM_ANDAMENTO`` (app/domain/scan/entities.py). As duas
+# precisam andar juntas: é este predicado que define o que é uma execução "viva"
+# para o índice unique parcial abaixo.
+EM_ANDAMENTO_SQL = (
+    "tier1_status IN ('queued', 'running')"
+    " OR tier2_status IN ('queued', 'running')"
+    " OR tier3_status IN ('queued', 'running')"
+)
+
+
 class ScanJobModel(Base):
+    """Uma linha = uma EXECUÇÃO de scan, não um commit.
+
+    Havia um ``UNIQUE(commit_sha)`` aqui, criado para tornar o disparo
+    idempotente (dois webhooks do mesmo push não podem gerar dois pipelines).
+    O efeito colateral era que rescanear a mesma branch reaproveitava a linha e
+    destruía o resultado anterior — não existia histórico.
+
+    A idempotência agora é expressa pelo que ela de fato significa: **no máximo
+    uma execução em andamento por commit**. Execuções encerradas não conflitam,
+    e é isso que permite empilhar o histórico.
+    """
+
     __tablename__ = "scan_jobs"
 
     __table_args__ = (
-        UniqueConstraint("commit_sha", name="scan_jobs_commit_sha_key"),
+        Index(
+            "uq_scan_jobs_commit_em_andamento",
+            "commit_sha",
+            unique=True,
+            postgresql_where=text(EM_ANDAMENTO_SQL),
+            sqlite_where=text(EM_ANDAMENTO_SQL),
+        ),
     )
 
     id = Column(Uuid(as_uuid=True), primary_key=True)

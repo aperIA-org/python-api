@@ -71,9 +71,11 @@ def test_create_scan_job(persistence_on):
     assert job.tier1_started_at is not None
 
 
-def test_redisparo_reinicia_a_execucao_anterior(persistence_on):
-    """A UNIQUE em commit_sha faz o redisparo cair na MESMA linha — ela não pode
-    manter os timestamps da execução anterior (a duração exibida viraria ficção).
+def test_redisparo_empilha_nova_execucao(persistence_on):
+    """Rescanear o mesmo commit insere uma linha nova, sem apagar a anterior.
+
+    Antes havia UNIQUE em ``commit_sha`` e o redisparo reaproveitava a linha
+    (``restart_execution``), então o resultado da execução anterior sumia.
     """
     scan_job_writer.create_scan_job(
         commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
@@ -85,21 +87,55 @@ def test_redisparo_reinicia_a_execucao_anterior(persistence_on):
         "a" * 40, {"risk_score": {"score": 70, "level": "high"}}
     )
     primeira = _read(persistence_on)
+    assert primeira.em_andamento() is False  # encerrada: o índice parcial libera
 
     scan_job_writer.create_scan_job(
         commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
     )
 
+    with persistence_on() as s:
+        repo = SQLAlchemyScanJobRepository(s)
+        assert repo.count() == 2
+        execucoes = repo.list_by_commit("a" * 40)
+        anterior = repo.get_by_id(primeira.id)
+
     segunda = _read(persistence_on)
+    assert segunda.id != primeira.id
+    assert [j.id for j in execucoes] == [segunda.id, primeira.id]
+
+    # a nova nasce em branco...
     assert segunda.tier1_status == TierStatus.RUNNING
     assert segunda.tier1_started_at >= primeira.tier1_started_at
     assert segunda.tier1_completed_at is None
     assert segunda.tier2_status is None
     assert segunda.blocked_at_tier is None
     assert segunda.final_risk_score is None and segunda.final_risk_level is None
-    # created_at preservado: é quando o commit entrou no sistema.
-    assert segunda.created_at == primeira.created_at
-    # E continua sendo uma única linha (nada de duplicar por commit).
+    # created_at agora é o início DESTA execução, não a entrada do commit.
+    assert segunda.created_at == segunda.tier1_started_at
+    assert segunda.created_at > primeira.created_at
+
+    # ...e a anterior continua exatamente como estava
+    assert anterior.tier1_status == TierStatus.DONE
+    assert anterior.tier1_completed_at == primeira.tier1_completed_at
+    assert anterior.tier2_status == TierStatus.DONE
+    assert anterior.blocked_at_tier == primeira.blocked_at_tier
+    assert anterior.final_risk_score == 70 and anterior.final_risk_level == "high"
+
+
+def test_redisparo_com_execucao_em_andamento_nao_duplica(persistence_on):
+    """A idempotência do disparo sobreviveu à queda do UNIQUE.
+
+    Dois webhooks do mesmo push não podem virar dois pipelines: o segundo colide
+    com a execução que o primeiro deixou em andamento (índice unique parcial) e
+    o ON CONFLICT DO NOTHING o descarta.
+    """
+    for _ in range(2):
+        scan_job_writer.create_scan_job(
+            commit_sha="a" * 40, repo_url="https://github.com/acme/repo", installation_id=1,
+        )
+
+    job = _read(persistence_on)
+    assert job.em_andamento() is True
     with persistence_on() as s:
         assert SQLAlchemyScanJobRepository(s).count() == 1
 

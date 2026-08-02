@@ -84,7 +84,8 @@ class TestHappyPath:
             mitre_techniques=["T1190", "T1059"],
         )
 
-        assert result["status"] == "ok"
+        # `status` responde "o Caldera respondeu?", nao "validou?".
+        assert result["status"] == "reachable"
         assert result["techniques_executed"] == 3
         assert result["techniques_successful"] == 2
         assert result["success_rate"] == pytest.approx(2 / 3)
@@ -112,7 +113,8 @@ class TestHappyPath:
         )
         client = _build_client()
         result = client.run_safe("x", ["T1190"])
-        assert result["status"] == "ok"
+        # `status` responde "o Caldera respondeu?", nao "validou?".
+        assert result["status"] == "reachable"
         assert result["caldera_validated"] is False
         assert result["success_rate"] == 0.0
 
@@ -270,7 +272,7 @@ class TestMapToAbilities:
             [self._ability("a1", "T1059"), self._ability("a2", "T1082")]
         )
 
-        assert client._map_to_abilities(["T1059", "T1082"]) == ["a1", "a2"]
+        assert client._map_to_abilities(["T1059", "T1082"]).abilities == ["a1", "a2"]
         assert client.client.get.call_count == 1
         assert client.client.get.call_args[0][0] == "/api/v2/abilities"
 
@@ -280,14 +282,14 @@ class TestMapToAbilities:
             [self._ability("sub", "T1497.003"), self._ability("outra", "T1082")]
         )
 
-        assert client._map_to_abilities(["T1497"]) == ["sub"]
+        assert client._map_to_abilities(["T1497"]).abilities == ["sub"]
 
     def test_subtecnica_exata_nao_traz_irmas(self):
         client = self._com_catalogo(
             [self._ability("a", "T1497.001"), self._ability("b", "T1497.003")]
         )
 
-        assert client._map_to_abilities(["T1497.003"]) == ["b"]
+        assert client._map_to_abilities(["T1497.003"]).abilities == ["b"]
 
     def test_ignora_ability_sem_executor_linux(self):
         """O agente do sandbox roda Linux: ability de Windows vira link que
@@ -299,24 +301,24 @@ class TestMapToAbilities:
             ]
         )
 
-        assert client._map_to_abilities(["T1059"]) == ["lin"]
+        assert client._map_to_abilities(["T1059"]).abilities == ["lin"]
 
     def test_tecnica_sem_correspondencia_devolve_vazio(self):
         client = self._com_catalogo([self._ability("a1", "T1059")])
 
-        assert client._map_to_abilities(["T9999"]) == []
+        assert client._map_to_abilities(["T9999"]).abilities == []
 
     def test_falha_ao_buscar_catalogo_nao_derruba(self):
         client = _build_client()
         client.client.get = MagicMock(side_effect=RuntimeError("boom"))
 
-        assert client._map_to_abilities(["T1059"]) == []
+        assert client._map_to_abilities(["T1059"]).abilities == []
 
     def test_lista_vazia_nao_faz_requisicao(self):
         client = _build_client()
         client.client.get = MagicMock()
 
-        assert client._map_to_abilities([]) == []
+        assert client._map_to_abilities([]).abilities == []
         client.client.get.assert_not_called()
 
 
@@ -408,7 +410,7 @@ class TestExecutavelNoSandbox:
     def _mapear(self, catalogo, tecnicas):
         client = _build_client()
         client.client.get = MagicMock(return_value=_resp(catalogo))
-        return client._map_to_abilities(tecnicas)
+        return client._map_to_abilities(tecnicas).abilities
 
     def test_descarta_exfiltracao_para_servico_externo(self):
         catalogo = [
@@ -505,3 +507,195 @@ class TestContagemDeAgentesDoGrupo:
             return_value=httpx.Response(200, json=["lixo", {"group": "red"}, None])
         )
         assert _build_client()._registrar_agentes_do_grupo("red") == 1
+
+
+class TestFallbackParaTecnicaPai:
+    """Fallback para a técnica-pai quando a sub-técnica não existe no catálogo.
+
+    Motivado por um scan real: o Tier 2 pediu `T1059.007`/`T1552.001` e o
+    catálogo do Caldera só tem `T1059.001/.002/.004` e `T1552.002/.003/.004`.
+    Sete técnicas viravam **zero** abilities — a emulação não rodava nada e o
+    relatório só dizia `caldera_validated: false`, sem o motivo.
+
+    O fallback recupera cobertura, mas o que ele encontra vale MENOS: emular
+    `T1059.001` (PowerShell) quando o achado é `T1059.007` (JavaScript) valida a
+    família, não o achado. Estes testes existem para garantir que essa distinção
+    não se perca — é ela que impede um "primo do seu problema" virar
+    `caldera_validated: true`.
+    """
+
+    def _ability(self, ability_id: str, technique_id: str):
+        return {
+            "ability_id": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": "linux", "command": "id"}],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_subtecnica_ausente_cai_para_o_pai_e_fica_marcada(self):
+        client = self._com_catalogo([self._ability("ps", "T1059.001")])
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == ["ps"]
+        assert mapa.pedidas_por_pai == ["T1059.007"]
+        assert mapa.tids_por_pai == {"T1059.001"}
+        # Não pode contar como exato: é outra sub-técnica.
+        assert mapa.tids_exatos == set()
+
+    def test_casamento_exato_nao_vira_fallback(self):
+        """Havendo a sub-técnica pedida, o pai não é consultado."""
+        client = self._com_catalogo(
+            [self._ability("exata", "T1059.007"), self._ability("irma", "T1059.001")]
+        )
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == ["exata"]
+        assert mapa.tids_exatos == {"T1059.007"}
+        assert mapa.pedidas_por_pai == []
+
+    def test_tecnica_sem_familia_no_catalogo_fica_sem_cobertura(self):
+        """`T1185` não tem nada da família — o fallback não inventa cobertura."""
+        client = self._com_catalogo([self._ability("outra", "T1059.001")])
+
+        mapa = client._map_to_abilities(["T1185"])
+
+        assert mapa.abilities == []
+        assert mapa.pedidas_sem_cobertura == ["T1185"]
+        assert mapa.pedidas_por_pai == []
+
+    def test_sucesso_apenas_por_fallback_nao_valida_o_achado(self):
+        """O coração da mudança: emulação da família não é validação."""
+        client = self._com_catalogo([self._ability("ps", "T1059.001")])
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        resultado = client._parse_results(
+            {"chain": [{"status": 0, "ability": {"technique_id": "T1059.001"}}]}, mapa
+        )
+
+        assert resultado["techniques_successful"] == 1
+        assert resultado["success_rate"] == 1.0
+        assert resultado["caldera_validated"] is False
+        assert resultado["validacao_parcial"] is True
+        assert resultado["tecnicas_por_pai"] == ["T1059.007"]
+
+    def test_sucesso_em_tecnica_exata_valida_mesmo_com_fallback_na_cadeia(self):
+        """Um fallback na lista não contamina o que casou exatamente."""
+        client = self._com_catalogo(
+            [self._ability("exata", "T1552.002"), self._ability("ps", "T1059.001")]
+        )
+        mapa = client._map_to_abilities(["T1552.002", "T1059.007"])
+
+        resultado = client._parse_results(
+            {
+                "chain": [
+                    {"status": 0, "ability": {"technique_id": "T1552.002"}},
+                    {"status": 0, "ability": {"technique_id": "T1059.001"}},
+                ]
+            },
+            mapa,
+        )
+
+        assert resultado["caldera_validated"] is True
+        assert resultado["validacao_parcial"] is False
+
+
+class TestAbilityQueImplantaAgente:
+    """Abilities que iniciam outro agente do Caldera são descartadas.
+
+    Incidente real: o fallback de pai (`T1059.007` → `T1059`) trouxe
+    `T1059.004` — "Start 54ndc47", cujo comando é `nohup ./sandcat.go &`. Uma
+    operação executa cada ability em TODOS os agentes do grupo, então cada
+    execução criava um agente que entrava no grupo e recebia a mesma ability.
+    Resultado: 20 agentes, 43 elos, operação sem fim e timeout de 600s.
+
+    O filtro roda ANTES do de credencial, porque este é o que causa laço.
+    """
+
+    def _ability(self, ability_id, technique_id, comando="id", payloads=None):
+        return {
+            "ability_id": ability_id,
+            "name": ability_id,
+            "technique_id": technique_id,
+            "executors": [
+                {
+                    "platform": "linux",
+                    "command": comando,
+                    "payloads": payloads or [],
+                }
+            ],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_descarta_start_sandcat(self):
+        """O caso exato do incidente."""
+        client = self._com_catalogo(
+            [
+                self._ability(
+                    "start", "T1059.004",
+                    comando="nohup ./sandcat.go -server #{server} &",
+                    payloads=["sandcat.go"],
+                )
+            ]
+        )
+
+        mapa = client._map_to_abilities(["T1059.004"])
+
+        assert mapa.abilities == []
+        assert mapa.implantam_agente == 1
+
+    def test_descarta_por_payload_mesmo_com_comando_inocente(self):
+        """`Weak executable files` injeta o lançador em executáveis graváveis —
+        o comando não parece deploy, o payload entrega."""
+        client = self._com_catalogo(
+            [self._ability("weak", "T1574.010", comando="find / -perm -333",
+                           payloads=["sandcat.go"])]
+        )
+
+        assert client._map_to_abilities(["T1574.010"]).abilities == []
+
+    def test_descarta_pelo_apelido_54ndc47(self):
+        """O Stockpile escreve "sandcat" como `54ndc47` em vários lugares."""
+        client = self._com_catalogo(
+            [self._ability("copy", "T1570", comando="scp 54ndc47 host:/tmp")]
+        )
+
+        assert client._map_to_abilities(["T1570"]).abilities == []
+
+    def test_nao_descarta_ability_comum(self):
+        """A regra precisa ser estreita: 5 de 70 abilities linux no catálogo."""
+        client = self._com_catalogo(
+            [self._ability("hist", "T1552.003", comando="cat ~/.bash_history")]
+        )
+
+        mapa = client._map_to_abilities(["T1552.003"])
+
+        assert mapa.abilities == ["hist"]
+        assert mapa.implantam_agente == 0
+
+    def test_fallback_nao_resgata_cobertura_com_ability_de_implantacao(self):
+        """Se a única candidata do pai implanta agente, a técnica fica SEM
+        cobertura — e não coberta por algo que não deveria rodar."""
+        client = self._com_catalogo(
+            [
+                self._ability(
+                    "start", "T1059.004",
+                    comando="nohup ./sandcat.go &", payloads=["sandcat.go"],
+                )
+            ]
+        )
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == []
+        assert mapa.pedidas_sem_cobertura == ["T1059.007"]
+        assert mapa.pedidas_por_pai == []

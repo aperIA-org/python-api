@@ -11,15 +11,20 @@ class ScanReportRepository(ABC):
 
     @abstractmethod
     def save(self, report: ScanReport) -> None:
-        """Persiste (ou substitui, via upsert) o relatório de um tier/commit."""
+        """Persiste o relatório de um tier de UMA execução.
+
+        O upsert é por ``(scan_job_id, tier)``: ele cobre replay do canvas
+        dentro da mesma execução. Uma reexecução do commit tem outro
+        ``scan_job_id`` e grava uma linha nova — é assim que o histórico existe.
+        """
 
     @abstractmethod
-    def get_by_commit(self, commit_sha: str) -> list[ScanReport]:
-        """Lista todos os relatórios de um commit, ordenados por tier."""
+    def get_by_scan_job(self, scan_job_id: UUID) -> list[ScanReport]:
+        """Lista os relatórios de uma execução, ordenados por tier."""
 
     @abstractmethod
-    def get_by_commit_and_tier(self, commit_sha: str, tier: int) -> ScanReport | None:
-        """Busca o relatório de um commit para um tier específico."""
+    def get_by_scan_job_and_tier(self, scan_job_id: UUID, tier: int) -> ScanReport | None:
+        """Busca o relatório de uma execução para um tier específico."""
 
     @abstractmethod
     def list_by_repository(self, repository_id: UUID) -> list[ScanReport]:

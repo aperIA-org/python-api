@@ -23,9 +23,15 @@ class RefreshTokenUseCase:
     Fluxo:
     1. Busca o token pelo hash SHA-256
     2. Se nao existir -> token invalido (erro generico)
-    3. Se existir mas estiver revogado -> reuso detectado -> revoga familia inteira
+    3. Se existir mas estiver revogado:
+       - revogado ha <= REFRESH_ROTATION_GRACE_SECONDS (por rotacao recente) ->
+         REPLAY CONCORRENTE BENIGNO: emite um novo par na mesma familia, sem
+         invalidar nada. E o caso do cliente com varias requisicoes em voo quando
+         o access expira (polling de um scan); sem isso, so uma rotaciona e as
+         demais levam 401 -> logout.
+       - revogado ha mais tempo -> reuso de fato -> revoga a familia inteira.
     4. Se expirado -> erro de expiracao
-    5. Revoga o token atual e emite um novo par (rotacao)
+    5. Caso normal: revoga o token atual e emite um novo par (rotacao)
 
     O family_id e mantido na rotacao para que um reuso futuro
     ainda invalide todos os tokens da cadeia.
@@ -44,8 +50,24 @@ class RefreshTokenUseCase:
         if record is None:
             raise TokenRevokedError("Refresh token nao encontrado.")
 
+        now = datetime.now(timezone.utc)
+
         if record.revoked:
-            # Possivel reuso malicioso: invalida toda a familia
+            if self._dentro_da_graca(record, now):
+                # Replay concorrente benigno: outra requisicao ja rotacionou
+                # este token ha instantes. Emite um par novo na mesma familia
+                # sem revogar nada — as requisicoes concorrentes todas seguem
+                # com sessao valida.
+                logger.info(
+                    "refresh_token_replay_concorrente",
+                    extra={
+                        "family_id": str(record.family_id),
+                        "user_id": str(record.user_id),
+                    },
+                )
+                return await self._emitir_par(record.user_id, record.family_id, now)
+
+            # Fora da janela: reuso de fato -> invalida toda a familia.
             logger.warning(
                 "refresh_token_reuse_detected",
                 extra={"family_id": str(record.family_id), "user_id": str(record.user_id)},
@@ -53,7 +75,6 @@ class RefreshTokenUseCase:
             await self._token_repo.revoke_family(record.family_id)
             raise TokenReusedError("Reuso de refresh token detectado.")
 
-        now = datetime.now(timezone.utc)
         expires_at = record.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -61,23 +82,39 @@ class RefreshTokenUseCase:
         if expires_at < now:
             raise TokenExpiredError("Refresh token expirado.")
 
-        # Rotacao: revoga o token atual
+        # Rotacao normal: revoga o token atual e emite um novo par.
         await self._token_repo.revoke_by_hash(token_hash)
+        return await self._emitir_par(record.user_id, record.family_id, now)
 
-        # Emite novo par mantendo a mesma familia
+    def _dentro_da_graca(self, record, now: datetime) -> bool:
+        """Se o token foi revogado ha pouco por ROTACAO (replay benigno).
+
+        ``revoked_at`` NULL (revogado antes da coluna existir, ou por um caminho
+        que nao carimba) conta como "ha muito tempo" — conservador: na duvida,
+        trata como reuso.
+        """
+        revoked_at = getattr(record, "revoked_at", None)
+        if revoked_at is None:
+            return False
+        if revoked_at.tzinfo is None:
+            revoked_at = revoked_at.replace(tzinfo=timezone.utc)
+        return (now - revoked_at) <= timedelta(
+            seconds=settings.REFRESH_ROTATION_GRACE_SECONDS
+        )
+
+    async def _emitir_par(self, user_id, family_id, now: datetime) -> AuthTokens:
+        """Emite um novo access + refresh, persistindo o refresh na familia."""
         new_access = create_access_token(
-            user_id=record.user_id,
+            user_id=user_id,
             secret=settings.SECRET_KEY,
             expire_minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES,
         )
         raw_new_refresh, new_hash = generate_opaque_token()
         new_expires = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-
         await self._token_repo.save(
-            user_id=record.user_id,
+            user_id=user_id,
             token_hash=new_hash,
-            family_id=record.family_id,
+            family_id=family_id,
             expires_at=new_expires,
         )
-
         return AuthTokens(access_token=new_access, refresh_token=raw_new_refresh)

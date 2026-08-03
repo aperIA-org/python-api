@@ -22,6 +22,7 @@ import structlog
 from celery.exceptions import Ignore
 
 from app.core.celery_app import celery_app
+from app.domain.finding import validation
 from app.infrastructure.ai import prompts
 from app.infrastructure.ai.claude_client import (
     CircuitOpenError,
@@ -382,11 +383,16 @@ def tier3_deep_analysis(
     findings.extend(tier3_data.get("findings", []) or [])
     cti_data = tier3_data.get("cti_data") or {}
     caldera_results = tier3_data.get("caldera_results") or {}
+    # Validacao POR FINDING, deterministica: separa o que a cadeia de
+    # ferramentas confirmou contra o alvo do que e' so sinalizacao estatica.
+    # Independe do Caldera (que valida por passo do attack path) e do modelo.
+    validacao = validation.resumo(findings)
 
     user_prompt = prompts.attack_path.build(
         findings=findings,
         cti_data=cti_data,
         caldera_results=caldera_results,
+        validacao=validacao,
         context={"commit": commit_sha},
     )
 
@@ -418,6 +424,7 @@ def tier3_deep_analysis(
                 if caldera_results and caldera_results.get("status") != "failed"
                 else "unavailable"
             ),
+            "validacao_evidencia": validacao,
         }
 
     analysis.setdefault("cti_status", "available" if cti_data else "unavailable")
@@ -431,6 +438,7 @@ def tier3_deep_analysis(
     analysis["findings"] = findings
     analysis["cti_data"] = cti_data
     analysis["caldera_results"] = caldera_results
+    analysis["validacao_evidencia"] = validacao
     scan_job_writer.mark_tier(commit_sha, 3, "done")
     scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
     return analysis

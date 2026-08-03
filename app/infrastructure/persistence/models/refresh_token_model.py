@@ -31,6 +31,13 @@ class RefreshTokenModel(Base):
         nullable=False,
     )
     revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Quando o token foi revogado — distingue uma revogacao por ROTACAO recente
+    # (replay concorrente benigno, dentro da janela de graca) de um reuso de fato.
+    # NULL para linhas revogadas antes desta coluna existir: tratadas como antigas.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

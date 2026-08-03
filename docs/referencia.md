@@ -14,7 +14,7 @@ Fontes: `openapi.yaml`, `.env.example`, `app/config.py`, `app/domain/{finding,sc
 | `POST` | `/users` | Cria usuário (senha com hash Argon2, e-mail único). Retorna só o `id`. | — |
 | `GET` | `/users/{user_id}` | Consulta dados públicos de um usuário por UUID. | — |
 | `POST` | `/auth/login` | Autentica e retorna `access_token` (15 min) + `refresh_token` (7 dias). | — |
-| `POST` | `/auth/refresh` | Troca um `refresh_token` válido por novo par (rotação); reuso detectado invalida a família. | — |
+| `POST` | `/auth/refresh` | Troca um `refresh_token` válido por novo par (rotação). Um token recém-rotacionado, reapresentado dentro de `REFRESH_ROTATION_GRACE_SECONDS` (30s), é replay concorrente benigno e recebe outro par — evita que requisições em paralelo (polling de scan) desloguem o usuário. Reuso fora da janela invalida a família. | — |
 | `POST` | `/auth/logout` | Invalida o `refresh_token` fornecido. Sempre `204` (evita oracle). | — |
 | `GET` | `/findings` | Lista findings do usuário logado (filtros `commit_sha`/`severity`/`tier`/`source`/`secret_verified`/`title` + paginação). Omite `raw_output`. `title` é **igualdade exata** — é o drill-down de um grupo, não busca livre. | JWT |
 | `GET` | `/findings/groups` | Findings agrupados por tipo (`source`+`severity`+`tier`+`title`+`asset`), com `ocorrencias`, `caminhos` distintos, intervalo de datas e uma `amostra` de caminhos. Sem paginação: o agrupamento derruba a cardinalidade em três ordens de grandeza. Declarada **antes** de `/findings/{finding_id}`, senão `groups` seria capturado como uuid. | JWT |

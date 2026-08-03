@@ -29,7 +29,8 @@ REGRAS INVIOLÁVEIS:
 2. Se "Dados CTI" disser "sem dados CTI disponíveis", retorne "cti_status": "unavailable" e NÃO mencione campanhas, grupos ou atores.
 3. Se "Dados Caldera" disser "sem dados de emulação Caldera disponíveis", retorne "caldera_status": "unavailable" e NÃO afirme que a exploração foi validada.
 4. Quando não houver findings suficientes para construir attack path plausível, retorne attack_path vazio e prioritized_actions explicando o motivo.
-5. Responda em PORTUGUÊS BRASILEIRO nos campos textuais.
+5. "caldera_validated" é EXCLUSIVO da emulação Caldera. O bloco "Validação por evidência" é um eixo SEPARADO (segredo verificado, active scan, observação direta) e NÃO alimenta esse campo — mas NÃO afirme que um finding marcado ali como CONFIRMADO é não validado: ele foi confirmado contra o alvo por outra via.
+6. Responda em PORTUGUÊS BRASILEIRO nos campos textuais.
 
 Formato de saída — JSON ESTRITAMENTE neste schema, sem markdown fences:
 {
@@ -120,11 +121,28 @@ def _format_caldera(caldera_results: dict | None) -> str:
     return "; ".join(parts)
 
 
+def _format_validacao(validacao: dict | None) -> str:
+    """Validacao por evidencia (deterministica), para o modelo nao declarar
+    "nao validado" sobre o que a cadeia de ferramentas ja confirmou."""
+    if not validacao or not validacao.get("grupos"):
+        return "sem sinal de validacao por evidencia"
+    partes: list[str] = []
+    for g in validacao["grupos"]:
+        selo = "CONFIRMADO" if g.get("confirmado") else "nao confirmado"
+        exemplos = ", ".join(g.get("exemplos") or [])
+        partes.append(
+            f"{g.get('rotulo')} [{selo}] — {g.get('total')} finding(s)"
+            + (f" (ex.: {exemplos})" if exemplos else "")
+        )
+    return "; ".join(partes)
+
+
 def build(
     findings: list[dict],
     cti_data: dict | None,
     caldera_results: dict | None,
     context: dict | None = None,
+    validacao: dict | None = None,
 ) -> str:
     ctx = context or {}
     commit = ctx.get("commit", "N/A")
@@ -132,5 +150,6 @@ def build(
         f"Commit: {commit}\n\n"
         f"Findings ({len(findings)}):\n{_format_findings(findings)}\n\n"
         f"Dados CTI: {_format_cti(cti_data)}\n\n"
-        f"Dados Caldera: {_format_caldera(caldera_results)}\n"
+        f"Dados Caldera: {_format_caldera(caldera_results)}\n\n"
+        f"Validacao por evidencia: {_format_validacao(validacao)}\n"
     )

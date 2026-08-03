@@ -262,6 +262,41 @@ Como a análise do Tier 2 não é determinística, a lista de técnicas varia en
 scans do mesmo commit — então `caldera_validated: true` seguirá possível e não
 garantido, mesmo depois de (2) e (3).
 
+### Validação por evidência — 1a etapa do reenquadramento (2026-08-02)
+
+A resposta ao passo 4 tem duas frentes: **A (reenquadrar)** — usar os sinais de
+validação que a cadeia já coleta — e **B (abilities web no Caldera)**. A frente
+A começou.
+
+O Caldera valida por emulação de host; para alvo web isso quase nunca casa. Mas
+TruffleHog e ZAP **já confirmam achados contra o alvo**, e esse sinal era
+ignorado — o relatório dizia "validado: não" para findings que a própria
+ferramenta havia confirmado. Agora ele é explícito e **determinístico**
+(`app/domain/finding/validation.py`), computado da evidência do scanner, não
+pedido ao modelo:
+
+| Método | Evidência | Confirma? |
+|---|---|---|
+| `secret_vivo` | TruffleHog verificou a credencial contra o provedor | sim |
+| `zap_ativo` | active scan enviou payload e o alvo respondeu vulnerável (`raw_output.attack`) | sim |
+| `zap_observado` | ZAP passivo de alta confiança observou a condição na resposta | sim (observação) |
+| `nao_validado` | Semgrep estático, segredo não verificado, ZAP de baixa confiança | não — é candidato |
+
+O Tier 3 anexa um resumo determinístico ao relatório, ao lado da validação do
+Caldera (dois eixos: emulação de adversário × evidência da ferramenta). Medido
+no scan real do Juice Shop: **2.998 findings confirmados contra o alvo** (2 por
+active scan, 2.996 por observação), onde o Caldera sozinho validava **0**. Os
+9.054 restantes ficam honestamente como "sinalizado, não confirmado".
+
+**Ainda aberto:** a frente B — abilities do Caldera que agem sobre o `target_url`
+por HTTP (forjar JWT com segredo vazado e chamar endpoint autenticado; testar
+credencial no login; refletir payload de XSS). É o que valida a **cadeia**, não
+findings isolados, e o que dá substância a "adversary emulation" para web. Exige
+escopar o egress do sandbox só ao alvo de DAST já validado — o guardrail de
+`target_url` (rejeita interno/localhost/metadata) é a base disso. É a decisão de
+produto: o Caldera é o motor de emulação para web, ou a validação web é papel do
+ZAP + verificação de segredo e o Caldera fica para host/infra?
+
 ---
 
 ## 5. Telas ainda em dados de demonstração

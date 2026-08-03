@@ -219,6 +219,31 @@ def _fallback_t3_markdown(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _secao_validacao_evidencia(validacao: dict[str, Any] | None) -> str:
+    """Secao DETERMINISTICA de validacao por evidencia.
+
+    Nasce em codigo, nao no modelo: e o antidoto para o relatorio dizer
+    "validado: nao" sobre achados que TruffleHog e ZAP ja confirmaram contra o
+    alvo. Convive com a validacao do Caldera (por passo do attack path) sem se
+    confundir com ela — sao dois eixos: emulacao de adversario x evidencia da
+    ferramenta.
+    """
+    if not validacao or not validacao.get("grupos"):
+        return ""
+    total = validacao.get("total", 0)
+    confirmados = validacao.get("confirmados", 0)
+    linhas = [
+        "**Validacao por evidencia (deterministica):** "
+        f"{confirmados} de {total} finding(s) confirmado(s) contra o alvo.",
+    ]
+    for g in validacao["grupos"]:
+        selo = " [confirmado]" if g.get("confirmado") else ""
+        exemplos = ", ".join(g.get("exemplos") or [])
+        sufixo = f": {exemplos}" if exemplos else ""
+        linhas.append(f"- {g.get('rotulo')}{selo} — {g.get('total')}{sufixo}")
+    return "\n".join(linhas)
+
+
 @celery_app.task(
     name="app.presentation.workers.reporting_worker.post_tier3_deep_report",
     bind=True,
@@ -281,6 +306,12 @@ def post_tier3_deep_report(
                     "reason": type(exc).__name__,
                 }
             )
+
+    secao_validacao = _secao_validacao_evidencia(
+        deep_analysis.get("validacao_evidencia")
+    )
+    if secao_validacao:
+        body = f"{body}\n\n{secao_validacao}"
 
     post_meta: dict[str, Any]
     if pr_number is None:

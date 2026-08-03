@@ -121,7 +121,10 @@ async def refresh(
         tokens = await use_case.execute(body.refresh_token)
         session.commit()
     except TokenReusedError as exc:
-        session.rollback()
+        # NAO faz rollback: o use case ja revogou a familia inteira e essa
+        # revogacao PRECISA persistir — e a resposta ao reuso. Um rollback aqui
+        # (o que havia antes) desfazia a defesa, deixando a familia viva.
+        session.commit()
         logger.warning("refresh_token_reuse_attempt_blocked")
         raise _UNAUTHORIZED from exc
     except (TokenExpiredError, TokenRevokedError) as exc:

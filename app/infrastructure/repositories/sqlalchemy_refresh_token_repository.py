@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.repositories.refresh_token_repository import RefreshTokenRepository
@@ -36,15 +36,22 @@ class SQLAlchemyRefreshTokenRepository(RefreshTokenRepository):
         return result.scalar_one_or_none()
 
     async def revoke_family(self, family_id: UUID) -> None:
+        # COALESCE preserva o instante da PRIMEIRA revogacao de cada token — a
+        # janela de graca se mede a partir da rotacao, nao de quando a familia
+        # foi invalidada depois.
         self._session.execute(
             update(RefreshTokenModel)
             .where(RefreshTokenModel.family_id == family_id)
-            .values(revoked=True)
+            .values(revoked=True, revoked_at=func.coalesce(
+                RefreshTokenModel.revoked_at, datetime.now(timezone.utc)
+            ))
         )
 
     async def revoke_by_hash(self, token_hash: str) -> None:
         self._session.execute(
             update(RefreshTokenModel)
             .where(RefreshTokenModel.token_hash == token_hash)
-            .values(revoked=True)
+            .values(revoked=True, revoked_at=func.coalesce(
+                RefreshTokenModel.revoked_at, datetime.now(timezone.utc)
+            ))
         )

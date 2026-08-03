@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-this-secret-key-with-at-least-32-characters"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Janela em que um refresh token recem-rotacionado, apresentado de novo, e
+    # tratado como replay concorrente benigno (o cliente tinha varias requisicoes
+    # em voo quando o access expirou) em vez de reuso malicioso. Sem ela, so uma
+    # das requisicoes concorrentes rotaciona e as outras levam 401 -> o middleware
+    # do front zera os cookies e desloga o usuario no meio de um scan.
+    # Fora da janela, um token revogado reapresentado ainda invalida a familia.
+    REFRESH_ROTATION_GRACE_SECONDS: int = 30
 
     # ---- GitHub App ----
     GITHUB_APP_ID: str = ""

@@ -201,6 +201,49 @@ class TestTier3DeepAnalysis:
         # SYSTEM é o de attack_path
         assert "MITRE ATT&CK" in kwargs["system"]
 
+    def test_anexa_validacao_por_evidencia_e_alimenta_o_prompt(
+        self, patched_deep_claude
+    ):
+        """A validacao por evidencia e deterministica: computada dos findings,
+        anexada ao resultado e injetada no prompt — para o modelo nao declarar
+        "nao validado" sobre o que ZAP/TruffleHog ja confirmaram."""
+        patched_deep_claude.call_json.return_value = {
+            "attack_path": [],
+            "kill_chain_complete": False,
+            "prioritized_actions": [],
+            "risk_score_adjusted": {"score": 70, "level": "high"},
+            "cti_status": "unavailable",
+            "caldera_status": "unavailable",
+        }
+        result = analysis_worker.tier3_deep_analysis.delay(
+            {
+                "findings": [
+                    {
+                        "source": "zap",
+                        "title": "XSS refletido",
+                        "raw_output": {"attack": "<script>", "confidence": "Medium"},
+                    }
+                ],
+                "cti_data": {},
+                "caldera_results": {},
+            },
+            commit_sha="a" * 40,
+            tier2_analysis={
+                "findings": [
+                    {"source": "trufflehog", "secret_verified": True, "title": "AWS"},
+                    {"source": "semgrep", "title": "SQLi", "raw_output": {}},
+                ]
+            },
+        ).get()
+
+        val = result["validacao_evidencia"]
+        assert val["total"] == 3
+        assert val["confirmados"] == 2  # secret vivo + zap ativo; semgrep nao
+        # o prompt recebeu o bloco deterministico
+        prompt = patched_deep_claude.call_json.call_args.kwargs["user"]
+        assert "Validacao por evidencia" in prompt
+        assert "CONFIRMADO" in prompt
+
     def test_circuit_open_yields_degraded(self, patched_deep_claude):
         from app.infrastructure.ai.claude_client import CircuitOpenError
 
@@ -278,6 +321,52 @@ class TestPostTier3DeepReport:
             "body"
         ]
         assert "T3 markdown" in body
+
+    def test_anexa_secao_deterministica_de_validacao_ao_body(
+        self, patched_reporting_claude_t3, patched_reporting_github_t3
+    ):
+        """A secao de validacao por evidencia e anexada em CODIGO, entao aparece
+        mesmo que o markdown do modelo nao a mencione."""
+        patched_reporting_claude_t3.call.return_value = MagicMock(text="## T3")
+        patched_reporting_github_t3.post_pr_comment.return_value = 1
+        reporting_worker.post_tier3_deep_report.delay(
+            {
+                "degraded": False,
+                "attack_path": [],
+                "risk_score_adjusted": {"score": 70, "level": "high"},
+                "prioritized_actions": [],
+                "cti_status": "unavailable",
+                "caldera_status": "unavailable",
+                "validacao_evidencia": {
+                    "total": 3,
+                    "confirmados": 2,
+                    "grupos": [
+                        {
+                            "metodo": "secret_vivo",
+                            "rotulo": "credencial verificada como válida",
+                            "confirmado": True,
+                            "total": 1,
+                            "exemplos": ["AWS key"],
+                        },
+                        {
+                            "metodo": "nao_validado",
+                            "rotulo": "sinalizada por análise",
+                            "confirmado": False,
+                            "total": 2,
+                            "exemplos": ["SQLi"],
+                        },
+                    ],
+                },
+            },
+            repo_full_name="acme/repo",
+            pr_number=7,
+            commit_sha="a" * 40,
+            installation_id=42,
+        ).get()
+        body = patched_reporting_github_t3.post_pr_comment.call_args.kwargs["body"]
+        assert "## T3" in body  # markdown do modelo preservado
+        assert "2 de 3 finding(s) confirmado(s)" in body
+        assert "credencial verificada como válida" in body
 
     def test_degraded_uses_fallback_markdown(
         self, patched_reporting_claude_t3, patched_reporting_github_t3

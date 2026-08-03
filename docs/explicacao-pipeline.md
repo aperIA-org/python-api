@@ -19,9 +19,9 @@ A escolha de estruturar o pipeline em 3 tiers escalonados — em vez de rodar
 tudo de uma vez sobre cada PR — é fundamentalmente uma decisão de **custo e
 latência**. As ferramentas de segurança que o aperIA orquestra têm perfis
 muito diferentes: TruffleHog e Semgrep no diff terminam em segundos; Trivy e
-Semgrep no repo inteiro levam minutos; ZAP fazendo active scan, OpenCTI
-consultando threat intel e Caldera emulando técnicas MITRE em sandbox podem
-levar de 30 a 60 minutos. Se todo PR disparasse os 3 tiers incondicionalmente,
+Semgrep no repo inteiro levam minutos; ZAP fazendo active scan
+e Caldera emulando técnicas MITRE em sandbox podem levar de 30 a 60 minutos (o
+Threat Intel KEV/EPSS é uma consulta HTTP rápida, não pesa nesse orçamento). Se todo PR disparasse os 3 tiers incondicionalmente,
 todo PR pagaria o custo (tempo de CI, tokens de Claude, carga nos scanners
 mais pesados) mesmo quando o problema já estava resolvido nos primeiros
 segundos — por exemplo, quando o próprio PR só tem um secret vazado e nada
@@ -33,7 +33,8 @@ Claude — ver §5 do `README.md`, "Tier 1 nunca chama Claude"), e serve de
 gate binário: se há um secret verificado, não há motivo para gastar mais
 nada, o PR já está bloqueado. Tier 2 introduz o primeiro custo real (Claude
 Sonnet correlacionando findings), mas ainda é uma varredura estática — não
-depende de infraestrutura externa como ZAP/OpenCTI/Caldera. Tier 3 é
+depende de infraestrutura externa como ZAP/Caldera (o Threat Intel virou
+KEV/EPSS, chamadas HTTP leves, sem container). Tier 3 é
 reservado para o cenário que de fato justifica o custo alto: quando a
 severidade encontrada até aqui já é `high` ou `critical`. Rodar ZAP, CTI e
 emulação de ataque em todo PR trivial seria desperdício; rodar só quando o
@@ -126,7 +127,7 @@ group(run_trufflehog, run_semgrep_changed)          [tier1]
   → _bridge_t1_findings_into_analyze → tier2_analyze  [analysis]  Claude Sonnet (chain_of_events)
   → post_tier2_report                                 [reporting] Claude Haiku (markdown no PR)
   → tier3_gate                                         [analysis]  Gate 2: escala se severidade ≥ high
-  → _prepare_tier3_payload → run_tier3_scan           [tier3]     ZAP + OpenCTI + Caldera
+  → _prepare_tier3_payload → run_tier3_scan           [tier3]     ZAP + Threat Intel (KEV/EPSS) + Caldera
   → _deep_analysis_bridge → tier3_deep_analysis        [analysis]  Claude Sonnet (attack_path)
   → post_tier3_deep_report                             [reporting] Claude Haiku (relatório final)
 ```
@@ -189,15 +190,15 @@ correlação contextual**. Vale ler o `RiskScorer` como um design alternativo
 já escrito e pronto para ser plugado (ou usado como piso/sanity-check do
 score do Claude), não como código morto sem propósito.
 
-Há ainda um detalhe que reforça que esse componente está genuinamente fora
-do caminho de execução, e não só "não chamado": o método `_cti_component` do
-`RiskScorer` lê a chave `active_campaigns` do payload de CTI, mas o scan de
-Tier 3 (`OpenCTIClient`) de fato produz a chave `active_threat`. Se o
-`RiskScorer` fosse plugado hoje sem ajuste, o componente de CTI cairia
-sempre no ramo `else` (25.0 fixo), porque a chave que ele procura nunca
-existe no dict real. É uma divergência latente — não afeta nada porque o
-código não roda, mas seria o primeiro bug a resolver no dia em que alguém
-decidir plugar o scorer de verdade.
+Havia aqui uma divergência latente que **foi corrigida** ao trocar o CTI por
+KEV/EPSS: o `_cti_component` do `RiskScorer` lia a chave `active_campaigns`,
+mas o `OpenCTIClient` só produzia `active_threat` — então o componente de CTI
+cairia sempre no ramo `else` (25.0 fixo), porque a chave procurada nunca
+existia. O novo `ThreatIntelClient` produz `active_campaigns` (campanha de
+ransomware do KEV) **e** `known_exploited` (CVE no KEV) **e** `epss_score`, e
+o `_cti_component` foi reescrito para: exploração comprovada ou campanha ativa
+→ 100; senão gradua pelo EPSS; senão o piso de 25. A divergência deixou de
+existir e o componente passou a refletir ameaça real.
 
 ---
 
@@ -229,8 +230,8 @@ seria caro demais para o SLA de poucos minutos que o Tier 1 promete; uma vez
 que o Tier 1 já filtrou o caso trivial (secret vazado), vale a pena investir
 mais tempo procurando o que o diff isolado não revela. O `cve_id` que o
 Trivy encontra é o dado que faz a ponte para o Tier 3 — é ele que a etapa
-seguinte usa para consultar OpenCTI e descobrir se aquele CVE específico está
-sendo explorado ativamente. Depois da dedup (que existe porque os mesmos
+seguinte usa para consultar KEV/EPSS e descobrir se aquele CVE específico está
+sendo explorado ativamente (KEV) e com que probabilidade (EPSS). Depois da dedup (que existe porque os mesmos
 findings tendem a se repetir entre execuções e entre scanners, mas
 deliberadamente não funde CVEs iguais vindos de fontes diferentes — o
 `source` é parte da chave), o Claude Sonnet recebe o conjunto agregado e
@@ -238,14 +239,16 @@ tenta montar uma `event_chain`: não trata cada finding como isolado, mas
 como possível passo de uma sequência de ataque, mapeando técnicas MITRE por
 passo e devolvendo o primeiro `risk_score`.
 
-**Tier 3 (ZAP + OpenCTI + Caldera, seguido de Claude Sonnet montando
-attack_path)** só existe porque, até aqui, tudo foi análise estática — nada
+**Tier 3 (ZAP + Threat Intel KEV/EPSS + Caldera, seguido de Claude Sonnet
+montando attack_path)** só existe porque, até aqui, tudo foi análise estática — nada
 foi de fato testado em execução. ZAP ataca o `target_url` real (DAST), e por
 isso é a evidência mais forte de exploitabilidade: uma vulnerabilidade
 confirmada por scan ativo pesa mais que uma inferida por padrão de código.
-OpenCTI responde a uma pergunta que nenhum scanner estático consegue
-responder por si — "esse CVE está sendo usado por atacantes de verdade, hoje,
-no mundo real?" — trazendo `active_threat` e técnicas MITRE associadas.
+O Threat Intel (CISA KEV + EPSS) responde a uma pergunta que nenhum scanner
+estático consegue responder por si — "esse CVE está sendo explorado por
+atacantes de verdade, hoje?" — via KEV (exploração comprovada + campanha de
+ransomware) e EPSS (probabilidade de exploração). Técnicas MITRE por CVE ficam
+para o passo 2 (OTX); hoje as técnicas da emulação vêm da cadeia do Tier 2.
 Caldera vai além: emula essas mesmas técnicas dentro de um sandbox isolado
 para medir se o ataque **de fato funciona** nesse ambiente específico
 (`success_rate`), a diferença entre "teoricamente vulnerável" e "comprovado

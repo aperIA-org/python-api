@@ -427,12 +427,17 @@ def tier3_deep_analysis(
             "validacao_evidencia": validacao,
         }
 
-    analysis.setdefault("cti_status", "available" if cti_data else "unavailable")
-    analysis.setdefault(
-        "caldera_status",
+    # Determinístico, NÃO `setdefault`: o modelo emite `cti_status`/
+    # `caldera_status` no JSON dele e, com `setdefault`, o valor DELE vencia — o
+    # modelo marcava `cti_status: unavailable` ao ver sinal fraco (EPSS baixo,
+    # sem KEV), mesmo com o CTI tendo respondido e `cti_data` populado. Esses
+    # flags são um fato — "a fonte respondeu?" —, não interpretação de ameaça, e
+    # quem sabe isso é o código, não o LLM.
+    analysis["cti_status"] = "available" if cti_data else "unavailable"
+    analysis["caldera_status"] = (
         "available"
         if caldera_results and caldera_results.get("status") != "failed"
-        else "unavailable",
+        else "unavailable"
     )
     analysis["degraded"] = False
     analysis["findings"] = findings

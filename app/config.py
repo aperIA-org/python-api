@@ -81,7 +81,26 @@ class Settings(BaseSettings):
     # do processo Java.
     ZAP_ASCAN_DISABLED_RULES: str = "40026"
 
-    # ---- Threat Intel (OpenCTI) ----
+    # ---- Threat Intel ----
+    # Fontes leves, sem infra (o OpenCTI exigia ElasticSearch/RabbitMQ/MinIO —
+    # vários GB, inviavel na maquina). KEV = arquivo JSON; EPSS = API REST grátis.
+    # CISA Known Exploited Vulnerabilities: catalogo de CVEs comprovadamente
+    # explorados no mundo real (o sinal "active_threat" mais honesto que existe).
+    CISA_KEV_URL: str = (
+        "https://www.cisa.gov/sites/default/files/feeds/"
+        "known_exploited_vulnerabilities.json"
+    )
+    # EPSS (FIRST.org): probabilidade (0-1) de exploracao nos proximos 30 dias.
+    EPSS_API_URL: str = "https://api.first.org/data/v1/epss"
+    # EPSS >= este valor conta como ameaca ativa mesmo fora do KEV.
+    EPSS_ACTIVE_THRESHOLD: float = 0.5
+    # TTL do cache do catalogo KEV em memoria (por worker). 6h: o catalogo muda
+    # no maximo algumas vezes por dia, e rebaixa-lo a cada CVE seria absurdo.
+    CTI_CACHE_TTL_SECONDS: int = 6 * 60 * 60
+    CTI_HTTP_TIMEOUT: float = 15.0
+
+    # OpenCTI: substituido por KEV+EPSS acima. Mantido para o passo 2 (OTX/OpenCTI
+    # como fonte rica opcional). Nao instanciado no pipeline atual.
     OPENCTI_URL: str = "http://opencti:8081"
     OPENCTI_TOKEN: str = ""
 

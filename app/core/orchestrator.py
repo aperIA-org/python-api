@@ -11,7 +11,7 @@ Sequência (decisão #1 Semana 12):
       → post_tier2_report   (Haiku — markdown; retorna analysis com _post_meta)
       → tier3_gate          (Ignore se severidade < high)
       → _bridge_to_t3_scan  ← helper: dispara tier3_scan_worker com cve_ids/target_url
-      → run_tier3_scan      (ZAP + OpenCTI + Caldera)
+      → run_tier3_scan      (ZAP + Threat Intel KEV/EPSS + Caldera)
       → _bridge_t2_t3       ← helper: combina dados T2 com payload T3 para deep_analysis
       → tier3_deep_analysis (Claude Sonnet — attack_path)
       → post_tier3_deep_report (Haiku — markdown final)
@@ -123,8 +123,9 @@ def _prepare_tier3_payload(
 
     # As técnicas MITRE da cadeia de ataque do Tier 2 são a fonte primária para
     # a emulação. Antes o Tier 3 só conhecia as técnicas vindas do
-    # enriquecimento CTI — que depende do OpenCTI (fora do ar) e de haver CVEs
-    # nos findings. Sem CVE e sem CTI, `mitre_techniques` era SEMPRE vazio: o
+    # enriquecimento CTI — que agora vem de KEV/EPSS (leves, sem infra) e ainda
+    # depende de haver CVEs nos findings. Sem CVE, `mitre_techniques` do CTI é
+    # vazio (KEV/EPSS não dão técnicas MITRE por CVE): o
     # Caldera recebia um adversário sem abilities e não executava nada.
     #
     # O Tier 2 já mapeia MITRE ATT&CK em cada passo do `event_chain` — é

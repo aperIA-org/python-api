@@ -1,6 +1,6 @@
 """Testes dos workers Tier 3 — scan + deep_analysis + report.
 
-Dependências externas (ZAP, OpenCTI, Caldera, Claude, GitHub) são
+Dependências externas (ZAP, Threat Intel, Caldera, Claude, GitHub) são
 sempre mockadas via ``patch`` no namespace do worker — Celery não
 serializa MagicMock como kwarg.
 """
@@ -41,9 +41,9 @@ def _make_zap_finding(**overrides) -> Finding:
 
 @pytest.fixture
 def patched_t3_deps():
-    """Mocka ZAPScanner, OpenCTIClient, CalderaClient no namespace do worker."""
+    """Mocka ZAPScanner, ThreatIntelClient, CalderaClient no namespace do worker."""
     with patch.object(tier3_scan_worker, "ZAPScanner") as Z, patch.object(
-        tier3_scan_worker, "OpenCTIClient"
+        tier3_scan_worker, "ThreatIntelClient"
     ) as O, patch.object(tier3_scan_worker, "CalderaClient") as C:
         Z.return_value.run_safe.return_value = []
         O.return_value.enrich_cve.return_value = None
@@ -55,7 +55,7 @@ def patched_t3_deps():
             "techniques_successful": 0,
             "ttps_used": [],
         }
-        yield {"zap": Z, "opencti": O, "caldera": C}
+        yield {"zap": Z, "cti": O, "caldera": C}
 
 
 class TestTier3ScanWorker:
@@ -84,8 +84,8 @@ class TestTier3ScanWorker:
         assert result["findings"][0]["source"] == "zap"
         assert result["findings"][0]["tier"] == 3
 
-    def test_opencti_enriches_each_distinct_cve(self, patched_t3_deps):
-        patched_t3_deps["opencti"].return_value.enrich_cve.side_effect = [
+    def test_cti_enriches_each_distinct_cve(self, patched_t3_deps):
+        patched_t3_deps["cti"].return_value.enrich_cve.side_effect = [
             {
                 "cve_id": "CVE-2021-44228",
                 "mitre_techniques": ["T1190"],
@@ -109,11 +109,34 @@ class TestTier3ScanWorker:
             repo_url="https://github.com/x/y",
         ).get()
         # Apenas 2 CVEs distintos
-        assert patched_t3_deps["opencti"].return_value.enrich_cve.call_count == 2
+        assert patched_t3_deps["cti"].return_value.enrich_cve.call_count == 2
         # CTI merged tem ambas as TTPs
         assert result["cti_data"]["active_threat"] is True
         assert "T1190" in result["cti_data"]["mitre_techniques"]
         assert "T1059" in result["cti_data"]["mitre_techniques"]
+
+    def test_cti_merge_carrega_kev_epss(self, patched_t3_deps):
+        """O merge propaga os sinais novos: OR nos binarios, MAX no EPSS."""
+        patched_t3_deps["cti"].return_value.enrich_cve.side_effect = [
+            {"active_threat": True, "known_exploited": True,
+             "active_campaigns": False, "epss_score": 0.3, "mitre_techniques": []},
+            {"active_threat": True, "known_exploited": False,
+             "active_campaigns": True, "epss_score": 0.9, "mitre_techniques": []},
+        ]
+        result = tier3_scan_worker.run_tier3_scan.delay(
+            target_url=None,
+            t2_findings=[
+                {"cve_id": "CVE-2021-44228", "severity": "critical"},
+                {"cve_id": "CVE-2022-22965", "severity": "high"},
+            ],
+            commit_sha="a" * 40,
+            repo_url="x",
+        ).get()
+        cti = result["cti_data"]
+        assert cti["known_exploited"] is True       # OR
+        assert cti["active_campaigns"] is True       # OR
+        assert cti["epss_score"] == 0.9              # MAX
+        assert cti["active_threat"] is True
 
     def test_cti_empty_when_no_cves(self, patched_t3_deps):
         result = tier3_scan_worker.run_tier3_scan.delay(
@@ -125,7 +148,7 @@ class TestTier3ScanWorker:
         assert result["cti_data"] == {}
 
     def test_caldera_invoked_with_merged_ttps(self, patched_t3_deps):
-        patched_t3_deps["opencti"].return_value.enrich_cve.return_value = {
+        patched_t3_deps["cti"].return_value.enrich_cve.return_value = {
             "mitre_techniques": ["T1190"],
             "active_threat": True,
         }

@@ -1,7 +1,7 @@
 """RiskScorer com dados reais de CTI (Semana 8).
 
 Esta suite valida o ``RiskScorer`` no domain consumindo dicts no
-formato que ``OpenCTIClient.enrich_cve`` produz. Inclui o teste
+formato que ``ThreatIntelClient.enrich_cve`` produz. Inclui o teste
 manual do checklist da Semana 8:
 
 - ``secret_verified=True`` → score ≥ 90 (regra hard inviolável)

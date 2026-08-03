@@ -100,29 +100,59 @@ Três defeitos que estavam escondidos atrás do ZAP sempre devolver zero:
 
 ---
 
-## 3. OpenCTI não sobe: falta dependência na stack
+## 3. CTI: OpenCTI não sobe — RESOLVIDO via CISA KEV + EPSS (2026-08-02)
+
+O diagnóstico original continua válido e vale registrar:
 
 ```
 [CHECK] checking if Search engine is alive → "Search engine seems down"
 CONFIGURATION_ERROR: Search engine seems down
 ```
 
-O OpenCTI 6.x exige um search engine (OpenSearch/Elasticsearch), e o
-`docker-compose.scanners.yml` define apenas `zap`, `opencti` e `caldera`.
-**Não existe search engine em lugar nenhum da stack** — não é regressão, é
-incompletude estrutural. Ele nunca subiu.
+O OpenCTI 6.x exige um search engine (OpenSearch/Elasticsearch) mais Redis,
+RabbitMQ e MinIO — vários GB de infraestrutura. O `docker-compose.scanners.yml`
+define apenas `zap`, `opencti` e `caldera`; **não existe search engine em lugar
+nenhum da stack** — não é regressão, é incompletude estrutural. Nesta máquina
+(WSL com ~8 GB, já saturado pela stack de scanners) ele nunca subiu, e o
+resultado era `cti_status=unavailable` em todo scan de Tier 3.
 
-Consequência: `cti_status=unavailable` em todo scan de Tier 3.
+**A opção (c) foi implementada: uma fonte de CTI leve, sem infraestrutura.** No
+lugar do OpenCTI, o Tier 3 agora consulta duas fontes públicas:
 
-**Próximos passos.** Decidir entre:
-- **(a)** completar a stack (OpenSearch + Redis + RabbitMQ + MinIO). É pesado, e
-  §0 recomenda cautela nesta máquina;
-- **(b)** deixar o CTI declaradamente fora do escopo e remover o serviço do
-  compose, para parar de sugerir que existe;
-- **(c)** substituir por uma fonte de CTI mais leve (consulta a API pública de
-  CVE, por exemplo).
+- **CISA KEV** (Known Exploited Vulnerabilities): um catálogo JSON (~1656 CVEs)
+  baixado de `known_exploited_vulnerabilities.json` e cacheado em memória. Diz se
+  um CVE está **comprovadamente sendo explorado no mundo real** — o sinal de
+  "ameaça ativa" mais honesto que existe — e traz `knownRansomwareCampaignUse`
+  (Known/Unknown), o sinal de campanha ativa. É um arquivo: zero memória local.
+- **EPSS** (FIRST.org): API REST grátis e sem chave
+  (`https://api.first.org/data/v1/epss?cve=…`) que dá a **probabilidade (0–1) de
+  exploração nos próximos 30 dias** por CVE. É uma chamada HTTP: zero memória
+  local.
 
-Enquanto não se decide, o container está parado.
+Juntas entregam exatamente o que o pipeline consome de CTI — "é ameaça ativa?" e
+"qual a probabilidade de exploração?" — sem ElasticSearch/RabbitMQ/MinIO.
+
+**Implementação.** Novo cliente `app/infrastructure/intelligence/threat_intel_client.py`
+(`ThreatIntelClient`), com a **mesma interface** do OpenCTI (`enrich_cve(cve_id)
+-> dict | None`) e fault-isolated: falha → `None` → `cti_status: unavailable`, o
+pipeline degrada como antes. O `OpenCTIClient` foi **deixado no repo mas não é
+mais instanciado** — fica reservado para o passo 2.
+
+**Correção de bug de brinde.** O contrato de retorno do `enrich_cve` agora inclui
+`active_campaigns` (= uso em campanha de ransomware). O `RiskScorer._cti_component`
+sempre testou `active_campaigns`, campo que o **OpenCTI nunca setava** — então o
+componente de CTI do score (peso 25%) caía sempre no ramo fixo de 25, de pé o
+OpenCTI ou não. Ver [explicacao-pipeline.md §3](explicacao-pipeline.md#3-gates-determinísticos-vs-score-do-claude).
+
+**Ressalva honesta.** Num scan web (Juice Shop) quase nenhum finding tem CVE —
+secrets e regras de Semgrep não têm — então o enriquecimento por CVE dispara
+pouco; mas quando há CVE, o sinal agora é real. E `mitre_techniques` fica `[]`:
+KEV/EPSS não fornecem técnicas MITRE por CVE. O Caldera não depende disso (usa o
+`event_chain` do Tier 2, ver §4).
+
+**Passo 2 (opcional, não bloqueia nada).** Uma fonte rica — OTX ou o próprio
+OpenCTI — para máquinas com infraestrutura, que traria as técnicas MITRE por CVE
+que o KEV/EPSS não têm. É por isso que o `OpenCTIClient` continua no repo.
 
 ---
 

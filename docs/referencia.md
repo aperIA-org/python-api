@@ -68,8 +68,12 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `ZAP_ASCAN_MAX_RULE_DURATION_MIN` | `2` | Teto por regra; impede que uma regra cara consuma o orçamento inteiro. |
 | `ZAP_ASCAN_THREADS_PER_HOST` | `2` | Concorrência de ataque por host. |
 | `ZAP_ASCAN_DISABLED_RULES` | `40026` | Ids de regras desligadas. `40026` é o DOM XSS, que sobe Firefox headless dentro do container do ZAP. Vazio = política completa. |
-| `OPENCTI_URL` | `http://opencti:8081` | Endpoint do OpenCTI (Tier 3 threat intel). |
-| `OPENCTI_TOKEN` | `""` | Autenticação no OpenCTI. |
+| `CISA_KEV_URL` | catálogo KEV da CISA | Fonte primária de Threat Intel: CVEs comprovadamente explorados. Arquivo JSON, cacheado em memória (`CTI_CACHE_TTL_SECONDS`). |
+| `EPSS_API_URL` | `https://api.first.org/data/v1/epss` | EPSS (FIRST.org): probabilidade (0-1) de exploração por CVE. Sem chave. |
+| `EPSS_ACTIVE_THRESHOLD` | `0.5` | EPSS ≥ isto conta como ameaça ativa mesmo fora do KEV. |
+| `CTI_CACHE_TTL_SECONDS` | `21600` | TTL do cache do catálogo KEV (6h). |
+| `CTI_HTTP_TIMEOUT` | `15.0` | Timeout das chamadas KEV/EPSS. |
+| `OPENCTI_URL` / `OPENCTI_TOKEN` | — | **Não usados no pipeline atual.** Reservados para o passo 2 (OTX/OpenCTI como fonte rica opcional). |
 | `CALDERA_URL` | `http://caldera:8888` | Endpoint do MITRE Caldera (Tier 3 emulação adversária). |
 | `CALDERA_API_KEY` | `""` | Autenticação no Caldera. |
 | `CALDERA_SANDBOX_MODE` | `True` | **Inviolável** — `false` levanta `SandboxViolationError` no `__init__` do `CalderaClient`. |
@@ -101,7 +105,7 @@ Fonte: `app/config.py` (singleton `settings`, pydantic `BaseSettings`, `case_sen
 | `description` | `str` | Mensagem detalhada (nunca logar valor de secret cru). |
 | `commit_sha` | `str` | SHA do commit analisado. |
 | `repo_url` | `str` | URL do repositório. |
-| `cve_id` | `CVEId \| None` | Value object; liga o finding ao enriquecimento OpenCTI no Tier 3. |
+| `cve_id` | `CVEId \| None` | Value object; liga o finding ao enriquecimento de Threat Intel (KEV/EPSS) no Tier 3. |
 | `cwe_id` | `str \| None` | Classificação CWE. |
 | `file_path` | `str \| None` | Caminho do arquivo. |
 | `line_number` | `int \| None` | Linha do arquivo. |
@@ -342,7 +346,7 @@ Volumes nomeados: `aperia_db_data` (dados do Postgres) e `aperia_redis_data`
 durabilidade equivalente — ver
 [explicacao-pipeline.md](explicacao-pipeline.md#7-jobs-travados-e-a-assimetria-de-durabilidade-entre-postgres-e-redis).
 
-Camadas opcionais (compose files adicionais): `docker-compose.scanners.yml` (ZAP `:8090`, OpenCTI `:8081`, Caldera `:8888` — necessários para o Tier 3 produzir dados reais) e `docker-compose.observability.yml` (Prometheus `:9090`, Grafana `:3000`).
+Camadas opcionais (compose files adicionais): `docker-compose.scanners.yml` (ZAP `:8090`, Caldera `:8888` — para o Tier 3 produzir dados reais; o CTI agora é KEV/EPSS via HTTP, sem container) e `docker-compose.observability.yml` (Prometheus `:9090`, Grafana `:3000`).
 
 ## 5. Plumbing do Claude
 

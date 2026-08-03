@@ -92,11 +92,11 @@ def patched_all_external():
         "app.presentation.workers.tier3_scan_worker.ZAPScanner",
         zap,
     )
-    opencti = MagicMock()
-    opencti.return_value.enrich_cve.return_value = None
+    cti = MagicMock()
+    cti.return_value.enrich_cve.return_value = None
     _start(
-        "app.presentation.workers.tier3_scan_worker.OpenCTIClient",
-        opencti,
+        "app.presentation.workers.tier3_scan_worker.ThreatIntelClient",
+        cti,
     )
     caldera = MagicMock()
     caldera.return_value.run_safe.return_value = {
@@ -156,7 +156,7 @@ def patched_all_external():
             "semgrep_t2": semgrep_t2,
             "prowler": prowler,
             "zap": zap,
-            "opencti": opencti,
+            "cti": cti,
             "caldera": caldera,
             "claude_analysis": claude_analysis,
             "claude_reporting": claude_reporting,
@@ -220,7 +220,7 @@ class TestFullPipelineEscalates:
         # Tier 3 executou (critical escala)
         patched_all_external["zap"].return_value.run_safe.assert_not_called()  # sem target_url
         patched_all_external["caldera"].return_value.run_safe.assert_called()
-        patched_all_external["opencti"].return_value.enrich_cve.assert_called()
+        patched_all_external["cti"].return_value.enrich_cve.assert_called()
 
         # Claude foi chamado para T2 e T3 (2 análises distintas)
         assert patched_all_external["claude_analysis"].return_value.call_json.call_count >= 2
@@ -301,7 +301,7 @@ class TestGate2Skips:
         patched_all_external["gh_reporting"].return_value.post_pr_comment.assert_called_once()
         # T3 NÃO executou
         patched_all_external["caldera"].return_value.run_safe.assert_not_called()
-        patched_all_external["opencti"].return_value.enrich_cve.assert_not_called()
+        patched_all_external["cti"].return_value.enrich_cve.assert_not_called()
         # Apenas 1 chamada ao Claude (tier2_analyze) — não houve tier3_deep_analysis
         assert patched_all_external["claude_analysis"].return_value.call_json.call_count == 1
 

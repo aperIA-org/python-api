@@ -8,8 +8,12 @@ Gate 1:
 - Zero chamadas Claude — economia de token + latência.
 
 Tier 2 análise:
-- Constrói o user prompt via ``chain_of_events.build()`` com dados
-  CTI / Caldera opcionais (vazios na Semana 6).
+- Constrói o user prompt via ``chain_of_events.build()`` a partir dos
+  findings. **Sem CTI e sem Caldera**: os dois rodam no Tier 3, depois
+  desta análise. O prompt já carregou blocos para eles e campos
+  ``cti_status``/``caldera_status`` na saída, sempre ``unavailable``
+  porque nada era passado — removidos, junto com o rodapé fixo que
+  isso produzia no relatório.
 - Chama ``ClaudeClient.call_json`` com modelo ``REASONING``.
 - Trata ``CircuitOpenError`` / ``GuardBlockedError`` retornando o
   payload bruto (modo degradado) — pipeline continua.
@@ -126,15 +130,19 @@ def tier2_analyze(
     gate1_output: dict[str, Any],
     *,
     commit_sha: str,
-    cti_data: dict | None = None,
-    caldera_results: dict | None = None,
 ) -> dict[str, Any]:
+    """Correlaciona os findings do Tier 1+2 numa cadeia de ataque.
+
+    Aceitava `cti_data`/`caldera_results` e reportava `cti_status`/
+    `caldera_status`, mas os dois vêm do **Tier 3** — o enriquecimento CTI e a
+    emulação rodam depois daqui. O único chamador em produção nunca passou nada,
+    então os campos eram sempre `unavailable` e o relatório do Tier 2 fechava com
+    um rodapé fixo que parecia falha e era só ausência de tentativa.
+    """
     findings = gate1_output.get("findings", [])
     scan_job_writer.mark_tier(commit_sha, 2, "running")
     user_prompt = prompts.chain_of_events.build(
         findings=findings,
-        cti_data=cti_data,
-        caldera_results=caldera_results,
         context={"commit": commit_sha},
     )
 
@@ -165,14 +173,8 @@ def tier2_analyze(
             # caminho normal, logo abaixo.
             "commit_sha": commit_sha,
             "findings": findings,
-            "cti_status": "available" if cti_data else "unavailable",
-            "caldera_status": "available" if caldera_results else "unavailable",
         }
 
-    analysis.setdefault("cti_status", "available" if cti_data else "unavailable")
-    analysis.setdefault(
-        "caldera_status", "available" if caldera_results else "unavailable"
-    )
     analysis["degraded"] = False
     analysis["findings"] = findings
     # A identidade do scan viaja NO PAYLOAD, não só nos kwargs do canvas: o

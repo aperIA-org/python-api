@@ -214,6 +214,49 @@ curl -s http://localhost:8000/health          # {"status":"ok"}
 docker compose -f docker-compose.base.yml ps  # todos "healthy"/"Up"
 ```
 
+## 6. Derrubar a stack
+
+A regra do `up` vale igual aqui: **o mesmo conjunto de arquivos**. Um `down` com
+menos arquivos do que o `up` é a receita para containers órfãos (ver o gotcha
+no fim desta seção).
+
+```bash
+docker compose -f docker-compose.base.yml \
+               -f docker-compose.scanners.yml \
+               -f docker-compose.targets.yml \
+               down --remove-orphans
+```
+
+Isso para e remove os containers e a rede `aperia_net`, **preservando os
+volumes** — banco e fila continuam lá quando você subir de novo. O
+`--remove-orphans` limpa containers de serviços que não existem mais no compose
+(ou que ficaram de uma invocação com outro conjunto de arquivos).
+
+Não precisa repetir os `--profile` do `up`: o `down` age sobre o projeto
+inteiro e leva junto os containers dos perfis que estiverem de pé.
+
+| Você quer | Comando | Estado que sobrevive |
+|---|---|---|
+| Pausar e voltar depois | `... stop` | Containers, volumes e rede |
+| Liberar recursos, manter os dados | `... down --remove-orphans` | Volumes (banco + fila) |
+| Começar do zero | `... down -v --remove-orphans` | **Nada** |
+
+> **`down -v` apaga banco e fila.** Some `aperia_db_data` (repositórios,
+> `scan_jobs`, `findings`, usuários) e `aperia_redis_data` (tarefas Celery
+> enfileiradas). Depois de um `-v` você precisa rodar as migrations do passo 4
+> de novo, senão a tabela `findings` não existe e a persistência cai no ramo
+> best-effort.
+
+> ⚠️ **Gotcha — derrubar só o base mata o Tier 3 depois:** `docker compose -f
+> docker-compose.base.yml down` (sem os outros dois arquivos) remove a rede
+> `python-api_aperia_net`, mas deixa ZAP, Caldera e Juice Shop para trás,
+> apontando para um ID de rede que não existe mais. Eles não voltam nunca mais:
+> qualquer start falha com `Error response from daemon: failed to set up
+> container networking: network <id> not found` e sai com **exit 255** — antes
+> de o processo iniciar, então `docker logs` mostra a execução *anterior*,
+> saudável, e nada parece errado no compose. O conserto é o
+> `--force-recreate` da [seção 3](#por-que-perfis-e-por-que-sempre-o-mesmo-conjunto-de-arquivos).
+
 ## Próximos passos
 
 - Confirmar que a stack está pronta para uma análise de ponta a ponta →

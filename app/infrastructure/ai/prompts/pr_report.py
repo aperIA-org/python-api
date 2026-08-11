@@ -1,5 +1,10 @@
 """Prompt de PR report (Tier 2).
 
+O rodapé "Status de inteligência" (CTI/Caldera) saiu: os dois só existem no
+Tier 3, então ele era fixo em `unavailable`/`unavailable` — informação zero
+ocupando espaço e sugerindo falha onde não houve tentativa. O relatório do
+Tier 3 continua reportando os dois, lá com dado real.
+
 Recebe a análise estruturada (output do chain_of_events) e gera
 markdown amigável para o desenvolvedor. Roda em Haiku — é formatação,
 não reasoning novo.
@@ -15,11 +20,10 @@ SYSTEM = """Você é um redator técnico que transforma análises estruturadas d
 
 REGRAS:
 1. Reflita EXATAMENTE os campos fornecidos. NÃO infira conclusões adicionais nem invente dados.
-2. Se "cti_status" == "unavailable", NÃO mencione campanhas ou atores.
-3. Se "caldera_status" == "unavailable", NÃO afirme exploração bem-sucedida.
-4. Tom: direto, acionável, em português brasileiro.
-5. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
-6. Tamanho: máximo 25 linhas de markdown.
+2. NÃO mencione campanhas, atores ou grupos de ameaça, e NÃO afirme que uma exploração foi validada: o Tier 2 não recebe inteligência externa nem resultado de emulação.
+3. Tom: direto, acionável, em português brasileiro.
+4. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
+5. Tamanho: máximo 25 linhas de markdown.
 
 Formato:
 ## aperIA — Análise de Segurança (Tier 2)
@@ -34,11 +38,7 @@ Formato:
 2. ...
 
 **Impacto de negócio:**
-<business_impact.description>
-
-**Status de inteligência:**
-- CTI: <available|unavailable>
-- Caldera: <available|unavailable>"""
+<business_impact.description>"""
 
 
 # Teto de findings embutidos no prompt.

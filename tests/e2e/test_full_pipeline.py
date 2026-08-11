@@ -119,8 +119,6 @@ def patched_all_external():
         "risk_score": {"score": 40, "level": "medium"},
         "business_impact": {"description": "x"},
         "attack_narrative": "narrative",
-        "cti_status": "unavailable",
-        "caldera_status": "unavailable",
     }
     _start(
         "app.presentation.workers.analysis_worker.ClaudeClient",

@@ -57,8 +57,6 @@ def _analysis(findings: list[dict], **overrides) -> dict:
         "event_chain": [],
         "business_impact": {},
         "attack_narrative": "",
-        "cti_status": "unavailable",
-        "caldera_status": "unavailable",
         "degraded": False,
     }
     base.update(overrides)

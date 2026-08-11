@@ -308,8 +308,6 @@ class TestTier2Analyze:
             "risk_score": {"score": 30, "level": "low"},
             "business_impact": {"description": "x", "estimated_cost_brl": None},
             "attack_narrative": "...",
-            "cti_status": "unavailable",
-            "caldera_status": "unavailable",
         }
         result = analysis_worker.tier2_analyze.delay(
             {"findings": [{"severity": "high", "source": "semgrep", "title": "x"}]},
@@ -319,7 +317,10 @@ class TestTier2Analyze:
         assert result["risk_score"]["score"] == 30
         kwargs = patched_analysis_claude.call_json.call_args.kwargs
         assert "Findings (1)" in kwargs["user"]
-        assert "sem dados CTI disponíveis" in kwargs["user"]
+        # CTI e Caldera são do Tier 3: o prompt do Tier 2 não carrega nem os
+        # blocos nem o antigo "sem dados disponíveis".
+        assert "CTI" not in kwargs["user"]
+        assert "Caldera" not in kwargs["user"]
 
     def test_payload_carrega_o_commit_para_o_gate2(self, patched_analysis_claude):
         """O Gate 2 só recebe este dict — sem a chave ele fica sem identidade."""
@@ -366,24 +367,61 @@ class TestTier2Analyze:
         assert result["degraded"] is True
         assert result["reason"] == "GuardBlockedError"
 
-    def test_empty_cti_caldera_still_works(self, patched_analysis_claude):
-        """Decisão #4: pipeline funciona com dicts vazios."""
+    def test_resultado_nao_carrega_status_de_inteligencia(
+        self, patched_analysis_claude
+    ):
+        """O Tier 2 não injeta mais `cti_status`/`caldera_status`.
+
+        Substitui `test_empty_cti_caldera_still_works`: os dois eram sempre
+        `unavailable` porque CTI e Caldera rodam no Tier 3 — o relatório fechava
+        com um rodapé fixo que parecia falha e era só ausência de tentativa.
+        """
         patched_analysis_claude.call_json.return_value = {
             "event_chain": [],
             "risk_score": {"score": 0, "level": "info"},
             "business_impact": {"description": ""},
             "attack_narrative": "",
-            "cti_status": "unavailable",
-            "caldera_status": "unavailable",
         }
         result = analysis_worker.tier2_analyze.delay(
             {"findings": []},
             commit_sha="a" * 40,
-            cti_data={},
-            caldera_results={},
         ).get()
-        assert result["cti_status"] == "unavailable"
-        assert result["caldera_status"] == "unavailable"
+        assert result["degraded"] is False
+        assert "cti_status" not in result
+        assert "caldera_status" not in result
+
+    def test_payload_degradado_tambem_nao_carrega_status_de_inteligencia(
+        self, patched_analysis_claude
+    ):
+        """O caminho degradado montava o dict à mão e também injetava os dois."""
+        from app.infrastructure.ai.claude_client import CircuitOpenError
+
+        patched_analysis_claude.call_json.side_effect = CircuitOpenError("open")
+        result = analysis_worker.tier2_analyze.delay(
+            {"findings": []},
+            commit_sha="a" * 40,
+        ).get()
+        assert result["degraded"] is True
+        assert "cti_status" not in result
+        assert "caldera_status" not in result
+
+    def test_tier2_analyze_recusa_cti_e_caldera_como_kwargs(
+        self, patched_analysis_claude
+    ):
+        """Lock da assinatura: um chamador que ainda passe os dados do Tier 3
+        deve falhar alto, não ser ignorado em silêncio."""
+        with pytest.raises(TypeError):
+            analysis_worker.tier2_analyze.delay(
+                {"findings": []},
+                commit_sha="a" * 40,
+                cti_data={},
+            )
+        with pytest.raises(TypeError):
+            analysis_worker.tier2_analyze.delay(
+                {"findings": []},
+                commit_sha="a" * 40,
+                caldera_results={},
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -421,8 +459,6 @@ class TestReportingWorker:
                 "event_chain": [],
                 "business_impact": {"description": "x"},
                 "attack_narrative": "...",
-                "cti_status": "unavailable",
-                "caldera_status": "unavailable",
             },
             repo_full_name="acme/repo",
             pr_number=7,
@@ -482,8 +518,6 @@ class TestReportingWorker:
                 "event_chain": [],
                 "business_impact": {},
                 "attack_narrative": "",
-                "cti_status": "unavailable",
-                "caldera_status": "unavailable",
             },
             repo_full_name="acme/repo",
             pr_number=7,
@@ -506,8 +540,6 @@ class TestReportingWorker:
                 "event_chain": [],
                 "business_impact": {},
                 "attack_narrative": "",
-                "cti_status": "unavailable",
-                "caldera_status": "unavailable",
             },
             repo_full_name="acme/repo",
             pr_number=7,
@@ -529,8 +561,6 @@ class TestReportingWorker:
                 "event_chain": [],
                 "business_impact": {},
                 "attack_narrative": "",
-                "cti_status": "unavailable",
-                "caldera_status": "unavailable",
             },
             repo_full_name="acme/repo",
             pr_number=None,

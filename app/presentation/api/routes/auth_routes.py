@@ -45,6 +45,15 @@ _AUTH_ERROR_RESPONSES = {
     500: {"description": "Erro interno ao acessar o banco.", "content": {"application/json": {"example": {"detail": "Internal server error"}}}},
 }
 
+@router.get('/secret')
+async def unsafeSecret(
+    request: Request,
+    session: Session = Depends(get_db)
+):
+    SUPER_IMPORTANT_SECRET = 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9'
+
+    return SUPER_IMPORTANT_SECRET;
+
 
 @router.post(
     "/login",

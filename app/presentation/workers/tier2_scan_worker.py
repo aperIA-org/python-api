@@ -2,7 +2,8 @@
 
 Diferenças em relação ao Tier 1:
 
-- **Trivy** sempre roda contra ``repo_path`` (SCA + IaC + containers).
+- **Trivy** sempre roda contra a árvore do commit (SCA + IaC +
+  containers).
 - **Semgrep** roda em modo *expanded* (``--config=auto``, repo
   inteiro) — mais profundo, mas só faz sentido depois que T1
   passou no Gate 1.
@@ -18,6 +19,10 @@ quando os findings T1 + T2 forem persistidos juntos.
 Findings são serializados como dict (Celery não transporta
 ``Finding``); o caller (orquestrador da Semana 12) reconstrói se
 precisar reaplicar a entidade.
+
+O worker faz o **próprio checkout** do commit: o container do Tier 2 não
+compartilha filesystem com o do Tier 1, então a árvore clonada lá não existe
+aqui. Racional completo em ``infrastructure/git/repo_checkout.py``.
 """
 from __future__ import annotations
 
@@ -29,13 +34,15 @@ import structlog
 from app.core.celery_app import celery_app
 from app.domain.finding.entities import Finding
 from app.domain.finding.services import FindingDeduplicator
-from app.infrastructure.persistence.finding_writer import persist_findings
+from app.infrastructure.git.repo_checkout import listar_arquivos_alterados
+from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.scanners.prowler_scanner import (
     ProwlerScanner,
     has_iac_files,
 )
 from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner
 from app.infrastructure.scanners.trivy_scanner import TrivyScanner
+from app.presentation.workers.checkout_guard import checkout_para_scan
 
 logger = structlog.get_logger()
 
@@ -73,10 +80,12 @@ def _findings_to_dicts(findings: list[Finding]) -> list[dict[str, Any]]:
 )
 def run_tier2_scan(
     self,
-    repo_path: str,
+    repo_full_name: str,
+    installation_id: int,
     changed_files: list[str],
     commit_sha: str,
     repo_url: str,
+    base_sha: str = "",
     cloud_provider: str = "aws",
 ) -> list[dict[str, Any]]:
     """Roda os 3 scanners de T2 em sequência (fault-isolated).
@@ -85,43 +94,59 @@ def run_tier2_scan(
     crítico (≤ 10 min). Paralelismo via Celery group adiciona
     complexidade de orquestração; sequencial dentro do mesmo worker
     é mais simples e tolera scanner indisponível via ``run_safe``.
+
+    ``changed_files`` aqui só decide se o Prowler roda (``has_iac_files``);
+    Trivy e Semgrep expanded sempre varrem a árvore inteira. Quando a lista
+    chega vazia e existe base (PR), calculamos o diff no próprio checkout —
+    sem isso o Prowler jamais dispararia, porque o canvas não carrega diff.
     """
-    trivy_findings: list[Finding] = TrivyScanner().run_safe(
-        target=repo_path,
+    with checkout_para_scan(
+        tier=2,
+        repo_full_name=repo_full_name,
         commit_sha=commit_sha,
-        repo_url=repo_url,
-    )
+        installation_id=installation_id,
+        base_sha=base_sha,
+    ) as repo_path:
+        arquivos = changed_files or listar_arquivos_alterados(
+            repo_path, base_sha=base_sha, head_sha=commit_sha
+        )
 
-    semgrep_findings: list[Finding] = _SemgrepExpandedAdapter().run_safe(
-        repo_path=repo_path,
-        commit_sha=commit_sha,
-        repo_url=repo_url,
-    )
-
-    prowler_findings: list[Finding] = []
-    if has_iac_files(changed_files):
-        prowler_findings = ProwlerScanner().run_safe(
-            provider=cloud_provider,
+        trivy_findings: list[Finding] = TrivyScanner().run_safe(
+            target=repo_path,
             commit_sha=commit_sha,
             repo_url=repo_url,
         )
-        logger.info(
-            "tier2_prowler_executed",
+
+        semgrep_findings: list[Finding] = _SemgrepExpandedAdapter().run_safe(
+            repo_path=repo_path,
             commit_sha=commit_sha,
-            iac_files_detected=True,
-            findings_count=len(prowler_findings),
+            repo_url=repo_url,
         )
-    else:
-        logger.info(
-            "tier2_prowler_skipped",
-            commit_sha=commit_sha,
-            reason="no_iac_files",
-        )
+
+        prowler_findings: list[Finding] = []
+        if has_iac_files(arquivos):
+            prowler_findings = ProwlerScanner().run_safe(
+                provider=cloud_provider,
+                commit_sha=commit_sha,
+                repo_url=repo_url,
+            )
+            logger.info(
+                "tier2_prowler_executed",
+                commit_sha=commit_sha,
+                iac_files_detected=True,
+                findings_count=len(prowler_findings),
+            )
+        else:
+            logger.info(
+                "tier2_prowler_skipped",
+                commit_sha=commit_sha,
+                reason="no_iac_files",
+            )
 
     aggregated = trivy_findings + semgrep_findings + prowler_findings
     deduplicated = FindingDeduplicator().deduplicate(aggregated)
 
-    persist_findings(deduplicated, commit_sha=commit_sha, tier=2)
+    persistir_ou_falhar(deduplicated, commit_sha=commit_sha, tier=2)
 
     logger.info(
         "tier2_scan_complete",

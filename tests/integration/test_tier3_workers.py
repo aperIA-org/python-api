@@ -1,6 +1,6 @@
 """Testes dos workers Tier 3 — scan + deep_analysis + report.
 
-Dependências externas (ZAP, OpenCTI, Caldera, Claude, GitHub) são
+Dependências externas (ZAP, Threat Intel, Caldera, Claude, GitHub) são
 sempre mockadas via ``patch`` no namespace do worker — Celery não
 serializa MagicMock como kwarg.
 """
@@ -41,9 +41,9 @@ def _make_zap_finding(**overrides) -> Finding:
 
 @pytest.fixture
 def patched_t3_deps():
-    """Mocka ZAPScanner, OpenCTIClient, CalderaClient no namespace do worker."""
+    """Mocka ZAPScanner, ThreatIntelClient, CalderaClient no namespace do worker."""
     with patch.object(tier3_scan_worker, "ZAPScanner") as Z, patch.object(
-        tier3_scan_worker, "OpenCTIClient"
+        tier3_scan_worker, "ThreatIntelClient"
     ) as O, patch.object(tier3_scan_worker, "CalderaClient") as C:
         Z.return_value.run_safe.return_value = []
         O.return_value.enrich_cve.return_value = None
@@ -55,7 +55,7 @@ def patched_t3_deps():
             "techniques_successful": 0,
             "ttps_used": [],
         }
-        yield {"zap": Z, "opencti": O, "caldera": C}
+        yield {"zap": Z, "cti": O, "caldera": C}
 
 
 class TestTier3ScanWorker:
@@ -84,8 +84,8 @@ class TestTier3ScanWorker:
         assert result["findings"][0]["source"] == "zap"
         assert result["findings"][0]["tier"] == 3
 
-    def test_opencti_enriches_each_distinct_cve(self, patched_t3_deps):
-        patched_t3_deps["opencti"].return_value.enrich_cve.side_effect = [
+    def test_cti_enriches_each_distinct_cve(self, patched_t3_deps):
+        patched_t3_deps["cti"].return_value.enrich_cve.side_effect = [
             {
                 "cve_id": "CVE-2021-44228",
                 "mitre_techniques": ["T1190"],
@@ -109,11 +109,34 @@ class TestTier3ScanWorker:
             repo_url="https://github.com/x/y",
         ).get()
         # Apenas 2 CVEs distintos
-        assert patched_t3_deps["opencti"].return_value.enrich_cve.call_count == 2
+        assert patched_t3_deps["cti"].return_value.enrich_cve.call_count == 2
         # CTI merged tem ambas as TTPs
         assert result["cti_data"]["active_threat"] is True
         assert "T1190" in result["cti_data"]["mitre_techniques"]
         assert "T1059" in result["cti_data"]["mitre_techniques"]
+
+    def test_cti_merge_carrega_kev_epss(self, patched_t3_deps):
+        """O merge propaga os sinais novos: OR nos binarios, MAX no EPSS."""
+        patched_t3_deps["cti"].return_value.enrich_cve.side_effect = [
+            {"active_threat": True, "known_exploited": True,
+             "active_campaigns": False, "epss_score": 0.3, "mitre_techniques": []},
+            {"active_threat": True, "known_exploited": False,
+             "active_campaigns": True, "epss_score": 0.9, "mitre_techniques": []},
+        ]
+        result = tier3_scan_worker.run_tier3_scan.delay(
+            target_url=None,
+            t2_findings=[
+                {"cve_id": "CVE-2021-44228", "severity": "critical"},
+                {"cve_id": "CVE-2022-22965", "severity": "high"},
+            ],
+            commit_sha="a" * 40,
+            repo_url="x",
+        ).get()
+        cti = result["cti_data"]
+        assert cti["known_exploited"] is True       # OR
+        assert cti["active_campaigns"] is True       # OR
+        assert cti["epss_score"] == 0.9              # MAX
+        assert cti["active_threat"] is True
 
     def test_cti_empty_when_no_cves(self, patched_t3_deps):
         result = tier3_scan_worker.run_tier3_scan.delay(
@@ -125,7 +148,7 @@ class TestTier3ScanWorker:
         assert result["cti_data"] == {}
 
     def test_caldera_invoked_with_merged_ttps(self, patched_t3_deps):
-        patched_t3_deps["opencti"].return_value.enrich_cve.return_value = {
+        patched_t3_deps["cti"].return_value.enrich_cve.return_value = {
             "mitre_techniques": ["T1190"],
             "active_threat": True,
         }
@@ -200,6 +223,49 @@ class TestTier3DeepAnalysis:
         assert "Findings (2)" in kwargs["user"]
         # SYSTEM é o de attack_path
         assert "MITRE ATT&CK" in kwargs["system"]
+
+    def test_anexa_validacao_por_evidencia_e_alimenta_o_prompt(
+        self, patched_deep_claude
+    ):
+        """A validacao por evidencia e deterministica: computada dos findings,
+        anexada ao resultado e injetada no prompt — para o modelo nao declarar
+        "nao validado" sobre o que ZAP/TruffleHog ja confirmaram."""
+        patched_deep_claude.call_json.return_value = {
+            "attack_path": [],
+            "kill_chain_complete": False,
+            "prioritized_actions": [],
+            "risk_score_adjusted": {"score": 70, "level": "high"},
+            "cti_status": "unavailable",
+            "caldera_status": "unavailable",
+        }
+        result = analysis_worker.tier3_deep_analysis.delay(
+            {
+                "findings": [
+                    {
+                        "source": "zap",
+                        "title": "XSS refletido",
+                        "raw_output": {"attack": "<script>", "confidence": "Medium"},
+                    }
+                ],
+                "cti_data": {},
+                "caldera_results": {},
+            },
+            commit_sha="a" * 40,
+            tier2_analysis={
+                "findings": [
+                    {"source": "trufflehog", "secret_verified": True, "title": "AWS"},
+                    {"source": "semgrep", "title": "SQLi", "raw_output": {}},
+                ]
+            },
+        ).get()
+
+        val = result["validacao_evidencia"]
+        assert val["total"] == 3
+        assert val["confirmados"] == 2  # secret vivo + zap ativo; semgrep nao
+        # o prompt recebeu o bloco deterministico
+        prompt = patched_deep_claude.call_json.call_args.kwargs["user"]
+        assert "Validacao por evidencia" in prompt
+        assert "CONFIRMADO" in prompt
 
     def test_circuit_open_yields_degraded(self, patched_deep_claude):
         from app.infrastructure.ai.claude_client import CircuitOpenError
@@ -278,6 +344,52 @@ class TestPostTier3DeepReport:
             "body"
         ]
         assert "T3 markdown" in body
+
+    def test_anexa_secao_deterministica_de_validacao_ao_body(
+        self, patched_reporting_claude_t3, patched_reporting_github_t3
+    ):
+        """A secao de validacao por evidencia e anexada em CODIGO, entao aparece
+        mesmo que o markdown do modelo nao a mencione."""
+        patched_reporting_claude_t3.call.return_value = MagicMock(text="## T3")
+        patched_reporting_github_t3.post_pr_comment.return_value = 1
+        reporting_worker.post_tier3_deep_report.delay(
+            {
+                "degraded": False,
+                "attack_path": [],
+                "risk_score_adjusted": {"score": 70, "level": "high"},
+                "prioritized_actions": [],
+                "cti_status": "unavailable",
+                "caldera_status": "unavailable",
+                "validacao_evidencia": {
+                    "total": 3,
+                    "confirmados": 2,
+                    "grupos": [
+                        {
+                            "metodo": "secret_vivo",
+                            "rotulo": "credencial verificada como válida",
+                            "confirmado": True,
+                            "total": 1,
+                            "exemplos": ["AWS key"],
+                        },
+                        {
+                            "metodo": "nao_validado",
+                            "rotulo": "sinalizada por análise",
+                            "confirmado": False,
+                            "total": 2,
+                            "exemplos": ["SQLi"],
+                        },
+                    ],
+                },
+            },
+            repo_full_name="acme/repo",
+            pr_number=7,
+            commit_sha="a" * 40,
+            installation_id=42,
+        ).get()
+        body = patched_reporting_github_t3.post_pr_comment.call_args.kwargs["body"]
+        assert "## T3" in body  # markdown do modelo preservado
+        assert "2 de 3 finding(s) confirmado(s)" in body
+        assert "credencial verificada como válida" in body
 
     def test_degraded_uses_fallback_markdown(
         self, patched_reporting_claude_t3, patched_reporting_github_t3

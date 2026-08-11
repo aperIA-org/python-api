@@ -1,0 +1,44 @@
+# Alvos de teste para o DAST — NÃO fazem parte do produto.
+#
+# Arquivo separado de propósito: `docker-compose.scanners.yml` sobe as
+# ferramentas que o pipeline USA (ZAP, Caldera, OpenCTI); aqui ficam aplicações
+# deliberadamente vulneráveis que o pipeline ATACA. Misturar as duas coisas
+# faria um alvo de teste parecer dependência da stack.
+#
+# Uso: atrás do perfil `dast`, junto do ZAP — alvo sem scanner não serve para
+# nada, e scanner sem alvo também não. O conjunto de arquivos é sempre o mesmo;
+# o que varia é o perfil (ver o cabeçalho de docker-compose.scanners.yml).
+#
+#   docker compose -f docker-compose.base.yml \
+#                  -f docker-compose.scanners.yml \
+#                  -f docker-compose.targets.yml \
+#                  --profile dast up -d
+#
+# Por que local e não a instância pública: o OWASP Juice Shop existe para ser
+# atacado, mas a demo pública é servidor de terceiro e infraestrutura
+# compartilhada — a própria documentação do projeto pede para não rodar
+# varredura automatizada contra ela. Com a instância local o alvo é seu, o teste
+# é legítimo, não há estado compartilhado com ninguém e o scan não sofre rate
+# limit.
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: aperia-juice-shop
+    profiles: [dast]
+    mem_limit: 1g
+    environment:
+      NODE_ENV: unsafe
+    ports:
+      # 3001 no host: a 3000 é do front-end Next em desenvolvimento.
+      # Dentro da rede, o ZAP alcança em http://juice-shop:3000.
+      - "3001:3000"
+    networks:
+      - aperia_net
+    # SEM healthcheck, deliberadamente. A imagem é distroless: não tem `sh`,
+    # `wget` nem `node` no PATH de `exec` — nenhuma das formas de healthcheck do
+    # Docker consegue rodar aqui. Tentei duas e as duas marcavam o container
+    # como "unhealthy" enquanto ele servia normalmente na 3000, o que é pior que
+    # não ter healthcheck: parece aplicação quebrada e manda depurar o alvo
+    # errado. Para conferir de fora:
+    #   curl -s localhost:3001/rest/admin/application-version

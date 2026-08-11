@@ -121,6 +121,29 @@ def _build_celery_app() -> Celery:
 # Cria o app primeiro — workers importam ``celery_app`` deste módulo.
 celery_app = _build_celery_app()
 
+# ``set_default()`` NÃO é decorativo: sem ele o disparo falha em produção.
+#
+# O ``current_app`` do Celery é **thread-local**. Criar a app marca-a como
+# corrente apenas na thread que executou este módulo (a principal). Numa outra
+# thread o Celery fabrica silenciosamente uma app ``'default'`` — com
+# ``DisabledBackend``, porque não tem configuração nenhuma.
+#
+# Isso morde o processo da API: as rotas são ``def`` (não ``async def``), então
+# o FastAPI as executa num threadpool. O canvas do pipeline é um chord
+# (``group | task``), e ``chord`` exige result backend — na thread errada a
+# checagem cai na app ``'default'`` e levanta
+# ``NotImplementedError: Starting chords requires a result backend``.
+#
+# O sintoma era intermitente e enganoso: funcionava na thread que por acaso
+# tivesse importado a app primeiro, e falhava nas demais. Pior, a linha do
+# ``ScanJob`` já tinha sido gravada quando o erro estourava, então o scan
+# aparecia no dashboard "em execução" enquanto a API devolvia 500.
+#
+# ``set_default()`` registra a app como fallback GLOBAL, válido em qualquer
+# thread. Os workers não dependiam disso (o Celery marca a app como corrente no
+# boot do worker), o que ajudou a esconder o problema.
+celery_app.set_default()
+
 # Valida importabilidade DEPOIS do app existir. Pega problemas de
 # packaging no boot (falta de ``__init__.py``, erro de sintaxe,
 # import quebrado) — em vez do erro obscuro do autodiscover em

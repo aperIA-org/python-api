@@ -6,19 +6,96 @@ from app.domain.scan.value_objects import TierStatus, ScanTier
 
 
 class ScanJobRepository(ABC):
-    @abstractmethod
-    async def save(self, job: ScanJob) -> None: ...
+    """Interface síncrona de persistência para ``ScanJob``."""
 
     @abstractmethod
-    async def get_by_id(self, job_id: UUID) -> ScanJob | None: ...
+    def save(self, job: ScanJob) -> None:
+        """Persiste um novo scan job de forma idempotente por ``commit_sha``."""
+        ...
 
     @abstractmethod
-    async def get_by_commit(self, commit_sha: str) -> ScanJob | None: ...
+    def get_by_id(self, job_id: UUID) -> ScanJob | None:
+        """Busca um scan job pelo seu identificador único."""
+        ...
 
     @abstractmethod
-    async def update_tier_status(
-        self, job_id: UUID, tier: ScanTier, status: TierStatus
-    ) -> None: ...
+    def get_by_commit(self, commit_sha: str) -> ScanJob | None:
+        """Busca um scan job pelo commit SHA (chave natural do pipeline)."""
+        ...
 
     @abstractmethod
-    async def set_blocked(self, job_id: UUID, blocked_at: ScanTier) -> None: ...
+    def update_tier_status(
+        self, commit_sha: str, tier: ScanTier, status: TierStatus
+    ) -> None:
+        """Atualiza o status (e timestamps) de um tier do scan job."""
+        ...
+
+    @abstractmethod
+    def set_blocked(self, commit_sha: str, blocked_at: ScanTier) -> None:
+        """Marca o scan job como bloqueado no tier informado."""
+        ...
+
+    @abstractmethod
+    def set_final_risk(self, commit_sha: str, score: int | None, level: str | None) -> None:
+        """Grava o score e o nível de risco final do scan job."""
+        ...
+
+    @abstractmethod
+    def list_in_progress(self) -> list[ScanJob]:
+        """Lista os jobs com algum tier ainda ``queued``/``running``.
+
+        Conjunto naturalmente pequeno (só o que está em voo) — é a entrada da
+        varredura de jobs travados, que aplica a regra de "sem progresso"
+        (``ScanJob.esta_travado``) no domínio, não em SQL.
+        """
+        ...
+
+    @abstractmethod
+    def fail_pending_tiers(self, commit_sha: str) -> None:
+        """Marca como ``failed`` todo tier ainda ``queued``/``running``.
+
+        Usado para liberar jobs travados: preserva os tiers já concluídos e
+        carimba ``tier*_completed_at`` só nos que foram encerrados agora.
+        """
+        ...
+
+    @abstractmethod
+    def list_by_commit(self, commit_sha: str) -> list[ScanJob]:
+        """Todas as execuções daquele commit, da mais recente para a mais antiga.
+
+        Substitui o antigo ``restart_execution``: rescanear não reescreve mais a
+        linha anterior, empilha uma nova. O histórico é o resultado disso.
+        """
+        ...
+
+    @abstractmethod
+    def list_recent(self, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
+        """Lista os scan jobs mais recentes, com paginação."""
+        ...
+
+    @abstractmethod
+    def count(self) -> int:
+        """Conta o total de scan jobs persistidos."""
+        ...
+
+    @abstractmethod
+    def list_by_user(self, user_id: UUID, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
+        """Lista os scan jobs de um usuário, do mais recente para o mais antigo, com paginação."""
+        ...
+
+    @abstractmethod
+    def count_by_user(self, user_id: UUID) -> int:
+        """Conta o total de scan jobs de um usuário."""
+        ...
+
+    @abstractmethod
+    def list_by_repository(
+        self, repository_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[ScanJob]:
+        """Lista os scan jobs de um repositório, do mais recente para o mais antigo, com paginação."""
+        ...
+
+    @abstractmethod
+    def count_by_repository(self, repository_id: UUID) -> int:
+        """Conta o total de scan jobs de um repositório."""
+        ...

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import logging
 
@@ -37,8 +39,21 @@ _INTERNAL_DB_ERROR = HTTPException(
     detail="Internal server error",
 )
 
+# Respostas de erro reaproveitadas na documentação OpenAPI das rotas de auth.
+_AUTH_ERROR_RESPONSES = {
+    401: {"description": "Credenciais inválidas ou token expirado/revogado/reusado.", "content": {"application/json": {"example": {"detail": "Credenciais invalidas ou token expirado."}}}},
+    500: {"description": "Erro interno ao acessar o banco.", "content": {"application/json": {"example": {"detail": "Internal server error"}}}},
+}
 
-@router.post("/login", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Login",
+    response_description="Autenticação bem-sucedida.",
+    responses=_AUTH_ERROR_RESPONSES,
+)
 async def login(
     body: LoginRequest,
     request: Request,
@@ -80,7 +95,14 @@ async def login(
     )
 
 
-@router.post("/refresh", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Renovar tokens (rotação)",
+    response_description="Novo par de tokens emitido.",
+    responses=_AUTH_ERROR_RESPONSES,
+)
 async def refresh(
     body: RefreshRequest,
     session: Session = Depends(get_db),
@@ -99,7 +121,10 @@ async def refresh(
         tokens = await use_case.execute(body.refresh_token)
         session.commit()
     except TokenReusedError as exc:
-        session.rollback()
+        # NAO faz rollback: o use case ja revogou a familia inteira e essa
+        # revogacao PRECISA persistir — e a resposta ao reuso. Um rollback aqui
+        # (o que havia antes) desfazia a defesa, deixando a familia viva.
+        session.commit()
         logger.warning("refresh_token_reuse_attempt_blocked")
         raise _UNAUTHORIZED from exc
     except (TokenExpiredError, TokenRevokedError) as exc:
@@ -116,7 +141,15 @@ async def refresh(
     )
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Logout",
+    response_description="Token revogado (ou já inválido). Sem corpo de resposta.",
+    responses={
+        500: {"description": "Erro interno ao acessar o banco.", "content": {"application/json": {"example": {"detail": "Internal server error"}}}},
+    },
+)
 async def logout(
     body: RefreshRequest,
     session: Session = Depends(get_db),

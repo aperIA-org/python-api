@@ -11,3 +11,16 @@ scripts
 *.crt
 *.p12
 *.pfx
+
+# Os padrões acima só casam a RAIZ do contexto de build — o Docker não expande
+# `*.pem` para subdiretórios. A chave privada do GitHub App vivia em
+# `app/secrets/` e o `COPY app ./app` do Dockerfile a assava na imagem (todas as
+# camadas, todo `docker push`). A chave agora entra só por bind mount em
+# `/app/secrets` (ver docker-compose.base.yml) — nunca por COPY.
+app/secrets/
+secrets/
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx

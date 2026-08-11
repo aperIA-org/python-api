@@ -109,3 +109,37 @@ class GitHubClient:
             raw.raise_for_status()
             return raw.text
         return ""
+
+    def get_branch_head_sha(self, repo_full_name: str, branch: str) -> str:
+        """Resolve o SHA do commit HEAD de um branch.
+
+        Usado pelo scan manual (``POST /repositories/{id}/scan``), que não tem
+        PR de onde tirar o ``head.sha``. ``GET /repos/{repo}/commits/{ref}``
+        aceita branch, tag ou SHA e devolve o commit resolvido.
+        """
+        resp = self.client.get(
+            f"{self.BASE}/repos/{repo_full_name}/commits/{branch}"
+        )
+        resp.raise_for_status()
+        return resp.json()["sha"]
+
+    def list_repositories(self) -> list[dict]:
+        """Lista os repositórios que a instalação enxerga.
+
+        Pagina ``GET /installation/repositories`` (100 por página). Cada item
+        traz ao menos ``id``, ``full_name``, ``html_url`` e ``default_branch``.
+        """
+        repos: list[dict] = []
+        page = 1
+        while True:
+            resp = self.client.get(
+                f"{self.BASE}/installation/repositories",
+                params={"per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json().get("repositories", []) or []
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return repos

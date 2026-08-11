@@ -58,7 +58,23 @@ class RiskScorer:
         return max(severity_map[f.severity] for f in findings)
 
     def _cti_component(self, cti_data: dict) -> float:
-        return 100.0 if cti_data.get("active_campaigns") else 25.0
+        """Componente CTI do score, agora alimentado por KEV + EPSS.
+
+        Antes: ``100 if cti_data.get("active_campaigns") else 25`` — mas o cliente
+        OpenCTI nunca setava ``active_campaigns`` (setava ``active_threat``), então
+        este componente **sempre valia 25**, com ou sem OpenCTI de pé. Bug latente,
+        corrigido de vez aqui.
+
+        Agora: exploração comprovada (KEV) ou campanha de ransomware ativa → 100
+        (é o teto de ameaça real). Sem isso, gradua pelo EPSS (probabilidade de
+        exploração). Sem sinal nenhum → o piso de 25 de antes.
+        """
+        if cti_data.get("known_exploited") or cti_data.get("active_campaigns"):
+            return 100.0
+        epss = cti_data.get("epss_score")
+        if isinstance(epss, (int, float)):
+            return 25.0 + 75.0 * max(0.0, min(1.0, float(epss)))
+        return 25.0
 
     def _caldera_component(self, caldera_results: dict) -> float:
         return caldera_results.get("success_rate", 0.0) * 100.0

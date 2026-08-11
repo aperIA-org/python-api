@@ -29,6 +29,42 @@ class PipelineHaltedError(AperiaError):
     """
 
 
+class RepoCheckoutError(AperiaError):
+    """Não foi possível materializar a árvore do commit em disco.
+
+    Cobre tudo que impede o checkout efêmero: token de instalação recusado,
+    repositório removido/renomeado, commit inexistente (force-push), rede
+    pendurada (timeout). Diferente das falhas de scanner, esta **não** é
+    best-effort: sem os arquivos não há o que escanear, então a task falha e
+    encerra os tiers pendentes do ``ScanJob``.
+    """
+
+
+class ScanDispatchError(AperiaError):
+    """O pipeline não pôde ser enfileirado (broker/result backend indisponível).
+
+    Distinta das falhas de execução: aqui nada chegou a rodar. A rota converte
+    em **503** com mensagem acionável, em vez de deixar vazar um 500 anônimo —
+    o usuário precisa saber que o problema é de infraestrutura e que tentar de
+    novo faz sentido, não que o repositório dele tem algo errado.
+    """
+
+
+class FindingPersistenceError(AperiaError):
+    """Findings foram encontrados mas não puderam ser gravados.
+
+    Pelo mesmo motivo de ``RepoCheckoutError``, esta **não** é best-effort. A
+    persistência já foi best-effort e escondeu um defeito real: um `cwe_id` de
+    93 caracteres numa coluna de 50 fez o `INSERT` estourar, o erro virou
+    warning, e o pipeline concluiu anunciando sucesso — com o finding visível no
+    payload do canvas, alimentando o Tier 2, e ausente do banco. No dashboard
+    isso é indistinguível de "repositório limpo".
+
+    Um scan que perde o que encontrou não teve sucesso. Perder findings em
+    silêncio é pior do que falhar: a falha é visível e reexecutável.
+    """
+
+
 class ScannerUnavailableError(AperiaError):
     """Scanner CLI não está instalado ou serviço externo está down.
 

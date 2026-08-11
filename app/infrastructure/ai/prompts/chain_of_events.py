@@ -1,18 +1,20 @@
 """Prompt de chain-of-events (Tier 2).
 
-Blindagem contra alucinação:
+**CTI e Caldera não entram aqui, por desenho.** Os dois rodam no Tier 3 — o
+enriquecimento do OpenCTI e a emulação do Caldera acontecem depois desta
+análise, não antes. O prompt já carregou blocos "Dados CTI"/"Dados Caldera" e
+campos `cti_status`/`caldera_status` no schema de saída, mas o único chamador em
+produção (`_bridge_t1_findings_into_analyze`) nunca passou esses dados: os
+blocos diziam sempre "sem dados disponíveis" e o relatório do Tier 2 fechava com
+um rodapé fixo de `unavailable`/`unavailable`. Era ruído que ocupava contexto e
+sugeria ao leitor que algo tinha falhado, quando nada tinha sido tentado.
 
-1. O SYSTEM instrui explicitamente o modelo a NÃO inventar dados de
-   CTI ou Caldera quando ausentes — deve usar ``"cti_status":
-   "unavailable"`` e ``"caldera_status": "unavailable"`` no JSON de
-   resposta.
-2. ``build()`` injeta sentinelas claros (``"sem dados CTI
-   disponíveis nesta análise"``, ``"sem dados de emulação Caldera
-   disponíveis"``) em vez de string vazia / "None" — strings vazias
-   foram mostradas em testes como gatilho para o modelo "preencher"
-   com plausibilidade.
-3. ``risk_score`` ausente faz fallback explícito em vez de Claude
-   adivinhar — o caller (`RiskScorer`) é a fonte de verdade.
+Blindagem contra alucinação que segue valendo:
+
+1. O SYSTEM manda refletir apenas o que está no prompt — nada de CVE, TTP, IOC
+   ou nome de campanha inventado.
+2. ``risk_score`` ausente faz fallback explícito em vez de Claude adivinhar — o
+   caller (`RiskScorer`) é a fonte de verdade.
 
 O `findings` é injetado como lista resumida; o conteúdo bruto vai
 para o LLM Guard antes de chegar aqui.
@@ -25,17 +27,18 @@ Sua tarefa: correlacionar findings de segurança e construir uma cadeia de event
 
 REGRAS INVIOLÁVEIS:
 1. Use APENAS dados fornecidos no prompt do usuário. NÃO invente CVEs, TTPs, IOCs, valores de risco, ou nomes de campanhas.
-2. Se o bloco "Dados CTI" disser "sem dados CTI disponíveis", retorne "cti_status": "unavailable" no JSON e NÃO mencione campanhas ativas, atores ou grupos.
-3. Se o bloco "Dados Caldera" disser "sem dados de emulação Caldera disponíveis", retorne "caldera_status": "unavailable" e NÃO afirme se a exploração teve sucesso.
-4. Quando não houver findings suficientes para uma cadeia plausível, retorne event_chain vazio e attack_narrative explicando o motivo.
-5. Responda em PORTUGUÊS BRASILEIRO no campo attack_narrative.
+2. NÃO mencione campanhas ativas, atores ou grupos de ameaça, e NÃO afirme que uma exploração teve sucesso: esta análise não recebe inteligência externa nem resultado de emulação.
+3. Quando não houver findings suficientes para uma cadeia plausível, retorne event_chain vazio e attack_narrative explicando o motivo.
+4. Responda em PORTUGUÊS BRASILEIRO no campo attack_narrative.
+5. Em "technique" e "technique_parent" escreva SOMENTE o identificador (ex.: "T1059.007", "T1059") — sem nome da técnica, sem parênteses, sem texto em volta. O campo é consumido por máquina: qualquer texto extra faz a emulação não encontrar a técnica.
 
 Formato de saída — JSON estritamente neste schema, sem markdown fences:
 {
   "event_chain": [
     {
       "step": <int>,
-      "technique": "<TXXXX ou null>",
+      "technique": "<TXXXX ou TXXXX.YYY, o ID MITRE MAIS ESPECIFICO que a evidencia sustenta, ou null>",
+      "technique_parent": "<TXXXX, a tecnica-pai de technique; igual a technique quando ela ja for pai; null se technique for null>",
       "description": "<string curta>",
       "finding_ids": ["<uuid|título>", ...]
     }
@@ -48,14 +51,8 @@ Formato de saída — JSON estritamente neste schema, sem markdown fences:
     "description": "<string>",
     "estimated_cost_brl": <float ou null>
   },
-  "attack_narrative": "<string>",
-  "cti_status": "available" | "unavailable",
-  "caldera_status": "available" | "unavailable"
+  "attack_narrative": "<string>"
 }"""
-
-
-_NO_CTI = "sem dados CTI disponíveis nesta análise"
-_NO_CALDERA = "sem dados de emulação Caldera disponíveis"
 
 
 def _format_findings(findings: list[dict]) -> str:
@@ -75,44 +72,7 @@ def _format_findings(findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_cti(cti_data: dict | None) -> str:
-    if not cti_data:
-        return _NO_CTI
-    # Renderiza apenas chaves esperadas — evita propagar payload
-    # arbitrário do OpenCTI até o prompt.
-    parts: list[str] = []
-    if "active_campaigns" in cti_data:
-        parts.append(f"campanhas ativas: {bool(cti_data['active_campaigns'])}")
-    if "ttps" in cti_data:
-        ttps = cti_data["ttps"]
-        if isinstance(ttps, list) and ttps:
-            parts.append("TTPs observadas: " + ", ".join(map(str, ttps)))
-    if not parts:
-        return _NO_CTI
-    return "; ".join(parts)
-
-
-def _format_caldera(caldera_results: dict | None) -> str:
-    if not caldera_results:
-        return _NO_CALDERA
-    parts: list[str] = []
-    if "success_rate" in caldera_results:
-        parts.append(f"taxa de sucesso: {caldera_results['success_rate']:.0%}")
-    if "techniques_executed" in caldera_results:
-        execs = caldera_results["techniques_executed"]
-        if isinstance(execs, list) and execs:
-            parts.append("técnicas executadas: " + ", ".join(map(str, execs)))
-    if not parts:
-        return _NO_CALDERA
-    return "; ".join(parts)
-
-
-def build(
-    findings: list[dict],
-    cti_data: dict | None,
-    caldera_results: dict | None,
-    context: dict | None = None,
-) -> str:
+def build(findings: list[dict], context: dict | None = None) -> str:
     """Constrói o user prompt para chain-of-events.
 
     O argumento ``context`` aceita ``{"commit": <sha>}`` opcionalmente.
@@ -121,7 +81,5 @@ def build(
     commit = ctx.get("commit", "N/A")
     return (
         f"Commit: {commit}\n\n"
-        f"Findings ({len(findings)}):\n{_format_findings(findings)}\n\n"
-        f"Dados CTI: {_format_cti(cti_data)}\n\n"
-        f"Dados Caldera: {_format_caldera(caldera_results)}\n"
+        f"Findings ({len(findings)}):\n{_format_findings(findings)}\n"
     )

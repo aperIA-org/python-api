@@ -19,3 +19,19 @@ class TokenReusedError(Exception):
     Reuso de refresh token detectado.
     Indica possivel comprometimento - toda a familia deve ser revogada.
     """
+
+
+class RepositoryInactiveError(Exception):
+    """Operacao pedida em repositorio desativado (rota mapeia para 409)."""
+
+
+class ScanAlreadyInProgressError(Exception):
+    """Ja existe um scan em andamento para o commit (rota mapeia para 409)."""
+
+
+class GithubAppNotConfiguredError(Exception):
+    """Credenciais do GitHub App ausentes (rota mapeia para 503)."""
+
+
+class GithubResolutionError(Exception):
+    """Falha ao consultar o GitHub durante a operacao (rota mapeia para 502)."""

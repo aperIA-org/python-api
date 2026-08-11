@@ -24,8 +24,19 @@ class TrivyScanner(BaseScanner):
         commit_sha: str,
         repo_url: str,
     ) -> list[Finding]:
+        # `fs` e' obrigatorio: `trivy <dir>` (sem subcomando) nao escaneia
+        # dependencias no Trivy moderno (0.71) — devolve saida nao-JSON e o
+        # scanner via `Results` vazio, entao TODO scan produzia 0 CVEs em
+        # silencio. Era por isso que o enriquecimento de CTI nunca disparava.
+        # `--scanners vuln,misconfig`: pegamos CVEs de dependencia E
+        # misconfiguracoes de IaC (ambos lidos abaixo); o scanner de secret e'
+        # trabalho do TruffleHog, entao fica de fora para nao duplicar nem pesar.
         result = subprocess.run(
-            ["trivy", target, "--format", "json", "--quiet", "--exit-code", "0"],
+            [
+                "trivy", "fs", target,
+                "--scanners", "vuln,misconfig",
+                "--format", "json", "--quiet", "--exit-code", "0",
+            ],
             capture_output=True,
             text=True,
             timeout=self.TIMEOUT,

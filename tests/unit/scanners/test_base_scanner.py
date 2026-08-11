@@ -66,6 +66,18 @@ class TestRunSafeFaultIsolation:
         findings = BoomScanner().run_safe(commit_sha="d" * 40)
         assert findings == []
 
+    def test_log_registra_o_tipo_da_excecao(self):
+        # `error` sozinho é a mensagem da lib e descreve o sintoma; o tipo é o
+        # que separa "ferramenta fora do ar" de "não terminou no tempo".
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            BoomScanner().run_safe(commit_sha="e" * 40)
+
+        skipped = [e for e in logs if e["event"] == "scanner_skipped"]
+        assert skipped, "esperava um evento scanner_skipped"
+        assert skipped[0]["error_type"] == "RuntimeError"
+
 
 class TestAbstractContract:
     def test_cannot_instantiate_without_scan_implementation(self):

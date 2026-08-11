@@ -10,6 +10,11 @@ para que falhas em um teste de AI não vazem para o próximo.
 """
 from __future__ import annotations
 
+import shutil
+import tempfile
+from contextlib import contextmanager
+from unittest.mock import patch
+
 import pytest
 
 from app.config import settings
@@ -35,6 +40,77 @@ def disable_findings_persistence():
         yield
     finally:
         settings.FINDINGS_PERSISTENCE_ENABLED = original
+
+
+@pytest.fixture(autouse=True)
+def alvo_interno_bloqueado_por_padrao():
+    """Força a postura de PRODUÇÃO na validação de alvo de DAST.
+
+    ``ALLOW_INTERNAL_DAST_TARGETS`` é uma flag de desenvolvimento: sem ela não
+    há como apontar a ``target_url`` para um Juice Shop local
+    (``http://juice-shop:3000``), que é exatamente o que a proteção anti-SSRF
+    recusa.
+
+    O problema é que ``settings`` lê o ``.env`` do desenvolvedor. Com a flag
+    ligada localmente, os 13 testes que provam a recusa de alvo interno
+    (loopback, RFC1918, metadata de cloud) passavam a falhar — ou, pior, num
+    cenário invertido, passariam a "passar" sem testar nada.
+
+    Um flag local não pode decidir se os testes de segurança rodam. O padrão
+    aqui é sempre ``False``; quem exercita a liberação passa
+    ``permitir_alvo_interno=True`` explicitamente ou religa o setting.
+    """
+    original = settings.ALLOW_INTERNAL_DAST_TARGETS
+    settings.ALLOW_INTERNAL_DAST_TARGETS = False
+    try:
+        yield
+    finally:
+        settings.ALLOW_INTERNAL_DAST_TARGETS = original
+
+
+@pytest.fixture(autouse=True)
+def disable_scan_persistence():
+    """Desliga a persistência best-effort do ScanJob por padrão.
+
+    Mesmo racional do ``disable_findings_persistence``: os workers/orquestrador
+    gravam o ciclo de vida do ScanJob via ``SessionLocal`` (Postgres). Em teste
+    não há banco — desligamos globalmente. Os testes que exercitam a persistência
+    religam o flag e injetam uma Session sqlite.
+    """
+    original = settings.SCAN_PERSISTENCE_ENABLED
+    settings.SCAN_PERSISTENCE_ENABLED = False
+    try:
+        yield
+    finally:
+        settings.SCAN_PERSISTENCE_ENABLED = original
+
+
+@pytest.fixture(autouse=True)
+def fake_repo_checkout():
+    """Neutraliza o checkout real do repositório nos scan workers.
+
+    Os workers de T1/T2 clonam o commit antes de rodar os scanners. Em teste
+    não há GitHub App, token nem rede — trocamos o clone por um diretório
+    temporário vazio (criado e apagado igual ao real, para que qualquer código
+    que dependa da existência do caminho continue válido).
+
+    O patch é só na referência que o ``checkout_guard`` importou: os testes do
+    próprio checkout usam ``infrastructure.git.repo_checkout`` direto e não são
+    afetados. Testes que precisam simular falha de checkout sobrescrevem este
+    patch localmente.
+    """
+    from app.presentation.workers import checkout_guard
+
+    @contextmanager
+    def _checkout_falso(**_kwargs):
+        destino = tempfile.mkdtemp(prefix="aperia-test-checkout-")
+        try:
+            yield destino
+        finally:
+            shutil.rmtree(destino, ignore_errors=True)
+
+    with patch.object(checkout_guard, "checkout_repo", _checkout_falso):
+        yield
 
 
 @pytest.fixture(autouse=True)

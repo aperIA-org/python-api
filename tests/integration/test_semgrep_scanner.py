@@ -28,26 +28,43 @@ def auto_with_cve_json() -> str:
 
 
 class TestScanChanged:
-    def test_returns_empty_when_no_changed_files(self):
-        findings = SemgrepScanner().scan_changed(
-            repo_path="/tmp/repo",
-            changed_files=[],
-            commit_sha="a" * 40,
-            repo_url="https://github.com/x/y",
-        )
-        assert findings == []
+    def test_scans_whole_tree_when_no_changed_files(self, security_audit_json):
+        """Sem diff (scan manual de branch) o alvo passa a ser a árvore inteira.
 
-    def test_does_not_invoke_subprocess_when_no_changed_files(self):
+        Antes este caminho devolvia ``[]`` sem chamar o Semgrep — era o motivo
+        de o Tier 1 concluir com zero findings em todo scan manual.
+        """
         with patch(
-            "app.infrastructure.scanners.semgrep_scanner.subprocess.run"
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            return_value=_completed(security_audit_json),
         ) as run_mock:
-            SemgrepScanner().scan_changed(
+            findings = SemgrepScanner().scan_changed(
                 repo_path="/tmp/repo",
                 changed_files=[],
                 commit_sha="a" * 40,
                 repo_url="https://github.com/x/y",
             )
-            run_mock.assert_not_called()
+
+        run_mock.assert_called_once()
+        assert run_mock.call_args.args[0][-1] == "."
+        assert len(findings) == 3
+
+    def test_explicit_changed_files_still_scope_the_scan(self, security_audit_json):
+        """Com diff, o alvo continua sendo só os arquivos do PR."""
+        with patch(
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            return_value=_completed(security_audit_json),
+        ) as run_mock:
+            SemgrepScanner().scan_changed(
+                repo_path="/tmp/repo",
+                changed_files=["app/db.py"],
+                commit_sha="a" * 40,
+                repo_url="https://github.com/x/y",
+            )
+
+        cmd = run_mock.call_args.args[0]
+        assert cmd[-1] == "app/db.py"
+        assert "." not in cmd
 
     def test_parses_security_audit_results(self, security_audit_json):
         with patch(
@@ -69,7 +86,8 @@ class TestScanChanged:
         assert sql.severity is Severity.HIGH
         assert sql.file_path == "app/db.py"
         assert sql.line_number == 42
-        assert sql.cwe_id == "CWE-89: SQL Injection"
+        # Só o identificador: a frase completa segue em `raw_output`.
+        assert sql.cwe_id == "CWE-89"
         assert sql.cve_id is None
 
     def test_severity_mapping_warning_to_medium(self, security_audit_json):
@@ -192,3 +210,39 @@ class TestScanDispatch:
                 repo_url="https://github.com/x/y",
             )
         assert all(f.tier == 1 for f in findings)
+
+
+def test_cwe_longo_do_semgrep_cabe_na_coluna():
+    """Regressão: o CWE real do Semgrep estourava `VARCHAR(50)`.
+
+    O Semgrep devolve `metadata["cwe"]` como LISTA de frases descritivas. O
+    valor real que quebrou a persistência em produção tem 93 caracteres, e as
+    fixtures usavam uma versão curta (21) que cabia — por isso nenhum teste
+    pegava. Aqui o valor é o real.
+    """
+    from app.infrastructure.scanners.semgrep_scanner import _normalizar_cwe
+
+    real = [
+        "CWE-79: Improper Neutralization of Input During Web Page "
+        "Generation ('Cross-site Scripting')"
+    ]
+    assert len(real[0]) > 50
+    normalizado = _normalizar_cwe(real)
+    assert normalizado == "CWE-79"
+    assert len(normalizado) <= 50
+
+
+def test_cwe_ausente_ou_vazio_vira_none():
+    from app.infrastructure.scanners.semgrep_scanner import _normalizar_cwe
+
+    assert _normalizar_cwe(None) is None
+    assert _normalizar_cwe([]) is None
+    assert _normalizar_cwe("") is None
+
+
+def test_cwe_sem_identificador_e_truncado():
+    """Formato inesperado não pode voltar a estourar a coluna."""
+    from app.infrastructure.scanners.semgrep_scanner import _normalizar_cwe
+
+    esquisito = "descricao sem identificador " * 10
+    assert len(_normalizar_cwe(esquisito)) <= 50

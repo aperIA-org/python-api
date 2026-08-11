@@ -1,17 +1,19 @@
-"""Tier 3 — ZAP + OpenCTI + Caldera, em sequência (fault-isolated).
+"""Tier 3 — ZAP + Threat Intel (KEV/EPSS) + Caldera, em sequência (fault-isolated).
 
 Pipeline:
 - ``ZAPScanner.run_safe(target_url, ...)`` — DAST contra deploy preview
-- ``OpenCTIClient.enrich_cve(cve)`` para cada CVE distinto nos findings
+- ``ThreatIntelClient.enrich_cve(cve)`` para cada CVE distinto nos findings
 - ``CalderaClient.run_safe(...)`` — emulação Caldera com TTPs do CTI
 
 Retorna dict agregado **JSON-safe**:
 
     {
         "findings": [<zap findings serializados>],
-        "cti_data": {"active_threat": bool, "mitre_techniques": [...]}
+        "cti_data": {"active_threat": bool, "known_exploited": bool,
+                     "active_campaigns": bool, "epss_score": float|None, ...}
                     ou {} se nenhum CVE foi enriquecido,
-        "caldera_results": {"status": "ok"|"failed", "success_rate": …}
+        "caldera_results": {"status": "reachable"|"failed", "success_rate": …,
+                            "caldera_validated": bool, "validacao_parcial": bool}
     }
 
 Por que sequencial: T3 não está no caminho crítico (30-60 min).
@@ -29,9 +31,9 @@ import structlog
 from app.core.celery_app import celery_app
 from app.core.exceptions import SandboxViolationError
 from app.domain.finding.entities import Finding
-from app.infrastructure.persistence.finding_writer import persist_findings
+from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.intelligence.mitre_caldera_client import CalderaClient
-from app.infrastructure.intelligence.opencti_client import OpenCTIClient
+from app.infrastructure.intelligence.threat_intel_client import ThreatIntelClient
 from app.infrastructure.scanners.zap_scanner import ZAPScanner
 
 logger = structlog.get_logger()
@@ -64,10 +66,15 @@ def _collect_cves(t2_findings: list[dict[str, Any]]) -> list[str]:
 def _merge_cti(cti_results: list[dict | None]) -> dict[str, Any]:
     """Combina enriquecimentos de múltiplos CVEs em um único dict.
 
-    - ``active_threat`` = OR lógico (qualquer CVE com ameaça ativa)
+    - sinais binários (``active_threat``/``known_exploited``/``active_campaigns``)
+      = OR lógico (qualquer CVE com o sinal)
+    - ``epss_score`` = máximo (o risco do conjunto é o do pior CVE)
     - ``mitre_techniques`` = união ordenada por primeira aparição
     """
     active = False
+    known_exploited = False
+    active_campaigns = False
+    epss_scores: list[float] = []
     techniques: list[str] = []
     seen: set[str] = set()
     cvss_scores: list[float] = []
@@ -76,6 +83,13 @@ def _merge_cti(cti_results: list[dict | None]) -> dict[str, Any]:
             continue
         if result.get("active_threat"):
             active = True
+        if result.get("known_exploited"):
+            known_exploited = True
+        if result.get("active_campaigns"):
+            active_campaigns = True
+        epss = result.get("epss_score")
+        if isinstance(epss, (int, float)):
+            epss_scores.append(float(epss))
         for ttp in result.get("mitre_techniques", []) or []:
             if ttp and ttp not in seen:
                 seen.add(ttp)
@@ -89,8 +103,14 @@ def _merge_cti(cti_results: list[dict | None]) -> dict[str, Any]:
 
     merged: dict[str, Any] = {}
     if cti_results and any(cti_results):
+        # OR nos sinais binários, MAX no EPSS: o risco do conjunto de CVEs é o do
+        # pior deles.
         merged["active_threat"] = active
+        merged["known_exploited"] = known_exploited
+        merged["active_campaigns"] = active_campaigns
         merged["mitre_techniques"] = techniques
+        if epss_scores:
+            merged["epss_score"] = max(epss_scores)
         if cvss_scores:
             merged["cvss_base"] = max(cvss_scores)
     return merged
@@ -109,6 +129,7 @@ def run_tier3_scan(
     commit_sha: str,
     repo_url: str,
     adversary_name: str | None = None,
+    mitre_techniques: list[str] | None = None,
 ) -> dict[str, Any]:
     # ---- ZAP DAST ----
     zap_findings: list[Finding] = []
@@ -125,13 +146,13 @@ def run_tier3_scan(
             reason="no_target_url",
         )
 
-    persist_findings(zap_findings, commit_sha=commit_sha, tier=3)
+    persistir_ou_falhar(zap_findings, commit_sha=commit_sha, tier=3)
 
-    # ---- OpenCTI por CVE ----
+    # ---- Threat Intel (KEV + EPSS) por CVE ----
     cves = _collect_cves(t2_findings)
     cti_results: list[dict | None] = []
     if cves:
-        client = OpenCTIClient()
+        client = ThreatIntelClient()
         for cve in cves:
             cti_results.append(client.enrich_cve(cve))
     cti_merged = _merge_cti(cti_results)
@@ -139,7 +160,16 @@ def run_tier3_scan(
     # ---- Caldera ----
     caldera_results: dict[str, Any]
     try:
-        techniques = cti_merged.get("mitre_techniques", [])
+        # União das duas fontes, cadeia do Tier 2 primeiro.
+        #
+        # A do CTI quase nunca soma técnicas: o KEV/EPSS não fornecem técnicas
+        # MITRE por CVE (isso é o passo 2 com OTX), e num scan web quase nenhum
+        # finding tem CVE. `mitre_techniques` do CTI fica `[]` — o Caldera então
+        # roda só sobre a cadeia do Tier 2, que é a fonte real de técnicas.
+        techniques = list(mitre_techniques or [])
+        for ttp in cti_merged.get("mitre_techniques", []) or []:
+            if ttp and ttp not in techniques:
+                techniques.append(ttp)
         caldera = CalderaClient()
         caldera_results = caldera.run_safe(
             adversary_name=adversary_name or f"pr-{commit_sha[:8]}",
@@ -161,6 +191,9 @@ def run_tier3_scan(
             "techniques_successful": 0,
             "ttps_used": [],
             "caldera_validated": False,
+            "validacao_parcial": False,
+            "tecnicas_por_pai": [],
+            "tecnicas_sem_cobertura": [],
         }
 
     logger.info(
@@ -170,6 +203,8 @@ def run_tier3_scan(
         cve_count=len(cves),
         cti_status="available" if cti_merged else "unavailable",
         caldera_status=caldera_results.get("status"),
+        caldera_validado=caldera_results.get("caldera_validated"),
+        caldera_parcial=caldera_results.get("validacao_parcial"),
     )
 
     return {

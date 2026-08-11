@@ -1,6 +1,6 @@
 # aperIA
 
-ASPM (Application Security Posture Management) open-source. Webhook de PR do GitHub → pipeline de scanners de segurança em **3 tiers** via Celery → **Claude** raciocina como atacante (correlaciona findings, monta attack paths) → entrega patches como **GitHub code suggestions**.
+ASPM (Application Security Posture Management) open-source. Webhook de PR do GitHub (ou scan manual via API) → pipeline de scanners de segurança em **3 tiers** via Celery → **Claude** raciocina como atacante (correlaciona findings, monta attack paths) → entrega patches como **GitHub code suggestions**.
 
 > **Premissa inviolável:** aperIA **nunca** aplica código sozinho. Todo patch sai como code suggestion para aprovação humana.
 
@@ -27,7 +27,7 @@ Entry: `main.py` (raiz) → `app.main:app` (uvicorn). Celery: `app.core.celery_a
 
 ## Pipeline (Celery canvas — `app/core/orchestrator.py`)
 
-Disparado por `POST /webhook/github`. 5 workers, cada um em sua fila:
+Dois gatilhos, um único ponto de disparo (`dispatch_pipeline` em `app/application/use_cases/trigger_scan_use_case.py`): `POST /webhook/github` (PR) e `POST /repositories/{id}/scan` (manual, HEAD do branch default, `pr_number=None` → workers de reporting pulam o comentário no PR; status check no commit continua). 5 workers, cada um em sua fila:
 `tier1` (TruffleHog + Semgrep changed) → **Gate 1** (bloqueia se `secret_verified`) → `tier2` (Trivy + Semgrep expanded + Prowler) → `tier2_analyze` (Sonnet) → report (Haiku) → **Gate 2** (escala se severidade ≥ high) → `tier3` (ZAP + OpenCTI + Caldera) → `tier3_deep_analysis` (Sonnet) → report final.
 
 - **Dicts, não entidades, trafegam no canvas** (Celery serializa JSON; workers fazem `_findings_to_dicts`).
@@ -40,7 +40,7 @@ Disparado por `POST /webhook/github`. 5 workers, cada um em sua fila:
 - **Dataclasses** para entidades de domínio; **structlog** estruturado (`logger.info("evento_snake", chave=valor, commit_sha=...)`); **nunca logar secret cru**.
 - **Repositories são SÍNCRONOS** (`Session`). Um engine async foi removido e o `FindingRepository` virou sync. Não introduza async no acesso a dados.
 - **Filosofia best-effort / nunca derrubar o pipeline:** scanner falho → `[]` (`BaseScanner.run_safe`); Claude falho → `{"degraded": True, ...}`; persistência falha → loga `finding_persistence_failed` e segue; gate → `Ignore()`. Preserve isso em código novo.
-- Exceções: base `AperiaError` (`core/exceptions.py`), auth em `application/exceptions.py`; rotas mapeiam exceção → HTTP status.
+- Exceções: base `AperiaError` (`core/exceptions.py`); `application/exceptions.py` guarda as de caso de uso (auth + disparo de scan: `RepositoryInactiveError`/`ScanAlreadyInProgressError`→409, `GithubResolutionError`→502, `GithubAppNotConfiguredError`→503); rotas mapeiam exceção → HTTP status.
 - Config via pydantic `BaseSettings` (`app/config.py`, singleton `settings`, lê `.env`).
 
 ## Persistência
@@ -52,7 +52,7 @@ Disparado por `POST /webhook/github`. 5 workers, cada um em sua fila:
 ## Comandos
 
 ```bash
-# testes (401 testes, cobertura alvo ≥70%)
+# testes (494 testes, cobertura alvo ≥70%)
 .venv/bin/python -m pytest tests/ -q
 
 # app (código é baked na imagem — rebuild ao mudar código)
@@ -69,4 +69,6 @@ Git: branch principal `main`. Execução detalhada em `GUIA_EXECUCAO.md` e `READ
 
 - `RiskScorer` determinístico **não está plugado** (score vem do Claude).
 - `/metrics` Prometheus **não exposto** (counters existem em `token_metrics.py`).
-- Checkout real do repo é pós-MVP — `repo_path` é stub, scans locais retornam 0 findings.
+- ZAP (DAST) roda quando o repositório tem `target_url` cadastrada (a URL da aplicação
+  publicada). Sem ela o Tier 3 registra `reason="no_target_url"` e faz só a análise de
+  código. A validação recusa alvos internos — um scan DAST dispara requisições ativas.

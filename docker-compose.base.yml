@@ -6,7 +6,7 @@
 #   filas Celery dedicadas (separação por tier evita backpressure).
 #   Tier 3 roda com concurrency=1 — operações Caldera são pesadas
 #   e síncronas.
-# - redis: broker + result backend
+# - redis: broker + result backend (com AOF e volume — ver comentário no serviço)
 # - db: Postgres 15 com asyncpg
 #
 # Usar em conjunto:
@@ -32,6 +32,13 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    volumes:
+      # Chave privada do GitHub App. O caminho é o mesmo do
+      # GITHUB_PRIVATE_KEY_PATH sugerido no .env.example — sem ele o serviço
+      # não consegue emitir installation token, e desde o checkout real isso
+      # não afeta só o post no PR: os workers de T1/T2 clonam o repositório
+      # antes de escanear, então sem token não há o que analisar.
+      - ./secrets:/app/secrets:ro
     networks:
       - aperia_net
     healthcheck:
@@ -53,6 +60,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      # Chave privada do App — ver comentário no serviço `api`.
+      - ./secrets:/app/secrets:ro
     networks:
       - aperia_net
 
@@ -69,6 +79,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      # Chave privada do App — ver comentário no serviço `api`.
+      - ./secrets:/app/secrets:ro
     networks:
       - aperia_net
 
@@ -105,6 +118,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      # Chave privada do App — ver comentário no serviço `api`.
+      - ./secrets:/app/secrets:ro
     networks:
       - aperia_net
 
@@ -121,12 +137,27 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      # Chave privada do App — ver comentário no serviço `api`.
+      - ./secrets:/app/secrets:ro
     networks:
       - aperia_net
 
   redis:
     image: redis:7-alpine
     container_name: aperia-redis
+    # AOF ligado + volume nomeado: o Redis é o broker do Celery, e sem
+    # persistência ele era o único componente do pipeline sem durabilidade.
+    # A assimetria custou caro: a API grava a linha do ScanJob no Postgres (que
+    # TEM volume) e publica as tarefas do tier 1 no Redis. Num `docker compose
+    # down` antes de um worker consumir a fila, as tarefas evaporavam e a linha
+    # sobrevivia — job órfão preso em "running" para sempre, bloqueando novos
+    # scans daquele commit (409). O AOF não elimina a classe do problema (worker
+    # morto no meio da task ainda perde a tarefa), por isso existe também a
+    # varredura de jobs travados — mas remove a causa raiz do incidente.
+    command: redis-server --appendonly yes
+    volumes:
+      - aperia_redis_data:/data
     networks:
       - aperia_net
     healthcheck:
@@ -158,3 +189,5 @@ networks:
 
 volumes:
   aperia_db_data:
+  # Fila do Celery (AOF do Redis). Ver o comentário no serviço `redis`.
+  aperia_redis_data:

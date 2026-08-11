@@ -98,7 +98,8 @@ class TestWorkerPersistsFindings:
         ]
 
         result = tier2_scan_worker.run_tier2_scan.delay(
-            repo_path="/tmp/repo",
+            repo_full_name="acme/repo",
+            installation_id=42,
             changed_files=[],
             commit_sha="a" * 40,
             repo_url="https://github.com/x/y",
@@ -120,7 +121,8 @@ class TestWorkerPersistsFindings:
 
         for _ in range(2):
             tier2_scan_worker.run_tier2_scan.delay(
-                repo_path="/tmp/repo",
+                repo_full_name="acme/repo",
+                installation_id=42,
                 changed_files=[],
                 commit_sha="a" * 40,
                 repo_url="https://github.com/x/y",
@@ -137,7 +139,8 @@ class TestWorkerPersistsFindings:
         ]
         with patch.object(finding_writer, "SessionLocal", sqlite_factory):
             tier2_scan_worker.run_tier2_scan.delay(
-                repo_path="/tmp/repo",
+                repo_full_name="acme/repo",
+                installation_id=42,
                 changed_files=[],
                 commit_sha="a" * 40,
                 repo_url="https://github.com/x/y",
@@ -147,8 +150,15 @@ class TestWorkerPersistsFindings:
             rows = SQLAlchemyFindingRepository(db).get_by_commit("a" * 40)
         assert rows == []
 
-    def test_db_failure_does_not_break_scan(self, patched_scanners):
-        """Persistência best-effort: erro de banco é engolido, scan retorna."""
+    def test_db_failure_falha_o_scan(self, patched_scanners):
+        """Perder findings FALHA a task — não é mais engolido.
+
+        O contrato era o oposto: erro de banco virava warning e o scan
+        concluía "com sucesso". Um `cwe_id` de 93 caracteres numa coluna de 50
+        derrubou o INSERT em produção e o pipeline anunciou zero findings sobre
+        um repositório onde ele mesmo achou um XSS. O dashboard lê o banco, não
+        o payload do canvas: silêncio ali é indistinguível de repositório limpo.
+        """
         patched_scanners["trivy"].return_value.run_safe.return_value = [
             _make_finding(file_path="x.py", line_number=1),
         ]
@@ -158,13 +168,37 @@ class TestWorkerPersistsFindings:
                 raise RuntimeError("db down")
 
             with patch.object(finding_writer, "SessionLocal", _boom):
-                result = tier2_scan_worker.run_tier2_scan.delay(
-                    repo_path="/tmp/repo",
-                    changed_files=[],
-                    commit_sha="a" * 40,
-                    repo_url="https://github.com/x/y",
-                ).get()
-            # Scan não quebrou — findings retornaram normalmente.
-            assert len(result) == 1
+                with pytest.raises(Exception) as exc_info:
+                    tier2_scan_worker.run_tier2_scan.delay(
+                        repo_full_name="acme/repo",
+                        installation_id=42,
+                        changed_files=[],
+                        commit_sha="a" * 40,
+                        repo_url="https://github.com/x/y",
+                    ).get()
+            # A causa precisa chegar legível a quem for depurar.
+            assert "db down" in str(exc_info.value) or "finding" in str(
+                exc_info.value
+            ).lower()
         finally:
             settings.FINDINGS_PERSISTENCE_ENABLED = False
+
+    def test_persistencia_desligada_nao_falha(self, patched_scanners):
+        """Sem persistência configurada não há perda — logo, não há falha."""
+        patched_scanners["trivy"].return_value.run_safe.return_value = [
+            _make_finding(file_path="x.py", line_number=1),
+        ]
+        settings.FINDINGS_PERSISTENCE_ENABLED = False
+
+        def _boom():
+            raise RuntimeError("db down")
+
+        with patch.object(finding_writer, "SessionLocal", _boom):
+            result = tier2_scan_worker.run_tier2_scan.delay(
+                repo_full_name="acme/repo",
+                installation_id=42,
+                changed_files=[],
+                commit_sha="a" * 40,
+                repo_url="https://github.com/x/y",
+            ).get()
+        assert len(result) == 1

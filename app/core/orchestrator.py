@@ -11,7 +11,7 @@ Sequência (decisão #1 Semana 12):
       → post_tier2_report   (Haiku — markdown; retorna analysis com _post_meta)
       → tier3_gate          (Ignore se severidade < high)
       → _bridge_to_t3_scan  ← helper: dispara tier3_scan_worker com cve_ids/target_url
-      → run_tier3_scan      (ZAP + OpenCTI + Caldera)
+      → run_tier3_scan      (ZAP + Threat Intel KEV/EPSS + Caldera)
       → _bridge_t2_t3       ← helper: combina dados T2 com payload T3 para deep_analysis
       → tier3_deep_analysis (Claude Sonnet — attack_path)
       → post_tier3_deep_report (Haiku — markdown final)
@@ -29,6 +29,7 @@ re-execução em caso de crash.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -51,6 +52,42 @@ logger = structlog.get_logger()
 # Tasks internas do orquestrador que combinam o resultado da task
 # anterior com state contextual (commit_sha, repo info, etc.). Cada
 # uma é JSON-serializável e idempotente.
+
+
+#: `T1059` ou `T1059.007`. O valor vem de um LLM, então extrair com regex em vez
+#: de confiar no formato: `"T1059 - Command and Scripting"` era aceito inteiro e
+#: não casava com ability nenhuma — zero abilities sem nenhum erro visível.
+_MITRE_ID = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+
+
+def _id_mitre(valor: Any) -> str | None:
+    achado = _MITRE_ID.search(str(valor or "").upper())
+    return achado.group(0) if achado else None
+
+
+def _tecnicas_da_cadeia(tier2_analysis: dict[str, Any]) -> list[str]:
+    """Extrai os IDs MITRE do `event_chain`, sem repetir e na ordem dos passos.
+
+    O schema do Tier 2 define `technique` como opcional, então passos sem
+    técnica identificada são normais e simplesmente não entram.
+
+    Preferimos sempre a técnica MAIS específica: é ela que descreve o achado, e
+    é contra ela que `caldera_validated` faz sentido. O `technique_parent` só
+    entra como resgate, quando `technique` vem vazia ou ilegível — ele **não** é
+    somado à lista, porque pedir o pai explicitamente faria o casamento parecer
+    exato e apagaria a distinção entre "emulei o seu problema" e "emulei um
+    parente dele" (ver `MapeamentoAbilities`).
+    """
+    tecnicas: list[str] = []
+    for passo in tier2_analysis.get("event_chain", []) or []:
+        if not isinstance(passo, dict):
+            continue
+        tecnica = _id_mitre(passo.get("technique")) or _id_mitre(
+            passo.get("technique_parent")
+        )
+        if tecnica and tecnica not in tecnicas:
+            tecnicas.append(tecnica)
+    return tecnicas
 
 
 @celery_app.task(
@@ -83,11 +120,25 @@ def _prepare_tier3_payload(
     if not tier2_analysis or not isinstance(tier2_analysis, dict):
         return None
     t2_findings = tier2_analysis.get("findings", []) or []
+
+    # As técnicas MITRE da cadeia de ataque do Tier 2 são a fonte primária para
+    # a emulação. Antes o Tier 3 só conhecia as técnicas vindas do
+    # enriquecimento CTI — que agora vem de KEV/EPSS (leves, sem infra) e ainda
+    # depende de haver CVEs nos findings. Sem CVE, `mitre_techniques` do CTI é
+    # vazio (KEV/EPSS não dão técnicas MITRE por CVE): o
+    # Caldera recebia um adversário sem abilities e não executava nada.
+    #
+    # O Tier 2 já mapeia MITRE ATT&CK em cada passo do `event_chain` — é
+    # literalmente a correlação que o produto promete. Ignorá-la e depender de
+    # uma fonte externa opcional era desperdiçar o dado mais relevante.
+    tecnicas_do_tier2 = _tecnicas_da_cadeia(tier2_analysis)
+
     t3_result = tier3_scan_worker.run_tier3_scan.run(
         target_url=target_url,
         t2_findings=t2_findings,
         commit_sha=commit_sha,
         repo_url=repo_url,
+        mitre_techniques=tecnicas_do_tier2,
     )
     return {
         "tier2_analysis": tier2_analysis,
@@ -130,10 +181,9 @@ def build_pipeline_canvas(
     *,
     commit_sha: str,
     repo_url: str,
-    pr_number: int,
+    pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
-    repo_path: str,
     base_sha: str,
     head_sha: str,
     changed_files: list[str],
@@ -143,18 +193,30 @@ def build_pipeline_canvas(
 
     Não dispara — apenas retorna o canvas. O caller usa
     ``canvas.delay()`` ou ``canvas.apply_async()`` para iniciar.
+
+    ``pr_number=None`` é um scan de branch (manual): o canvas é idêntico, só
+    não há PR onde comentar — os workers de report pulam o post e mantêm o
+    relatório apenas na projeção consumível via API.
+
+    O canvas **não** carrega ``repo_path``: cada task que precisa dos arquivos
+    faz o próprio checkout efêmero a partir de ``repo_full_name`` +
+    ``commit_sha`` + ``installation_id``, porque os workers de T1 e T2 rodam em
+    containers sem filesystem comum (ver ``infrastructure/git/repo_checkout``).
     """
     tier1_group = group(
         tier1_scan_worker.run_trufflehog.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             base_sha=base_sha,
             head_sha=head_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         ),
         tier1_scan_worker.run_semgrep_changed.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             changed_files=changed_files,
+            base_sha=base_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         ),
@@ -172,8 +234,10 @@ def build_pipeline_canvas(
         )
         # Gate1 passou — agora roda Tier 2 (Trivy + Semgrep expanded + Prowler)
         | _t1_to_t2_scan_bridge.s(
-            repo_path=repo_path,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
             changed_files=changed_files,
+            base_sha=base_sha,
             commit_sha=commit_sha,
             repo_url=repo_url,
         )
@@ -215,8 +279,10 @@ def _t1_to_t2_scan_bridge(
     self,
     gate1_output: dict[str, Any] | None,
     *,
-    repo_path: str,
+    repo_full_name: str,
+    installation_id: int,
     changed_files: list[str],
+    base_sha: str,
     commit_sha: str,
     repo_url: str,
 ) -> dict[str, Any] | None:
@@ -231,8 +297,10 @@ def _t1_to_t2_scan_bridge(
         return None
     t1_findings = gate1_output.get("findings", []) or []
     t2_findings = tier2_scan_worker.run_tier2_scan.run(
-        repo_path=repo_path,
+        repo_full_name=repo_full_name,
+        installation_id=installation_id,
         changed_files=changed_files,
+        base_sha=base_sha,
         commit_sha=commit_sha,
         repo_url=repo_url,
     )
@@ -272,36 +340,80 @@ def start_pipeline(
     *,
     commit_sha: str,
     repo_url: str,
-    pr_number: int,
+    pr_number: int | None,
     installation_id: int,
     repo_full_name: str,
-    repo_path: str,
     base_sha: str,
     head_sha: str,
     changed_files: list[str],
     target_url: str | None = None,
+    user_id: Any = None,
+    repository_id: Any = None,
 ) -> Any:
     """Entry point chamado pelo webhook.
 
     Retorna o ``AsyncResult`` do canvas — útil em testes para
     inspecionar state. Em produção o webhook ignora o retorno.
     """
+    from app.core.exceptions import ScanDispatchError
+    from app.infrastructure.persistence import scan_job_writer
+
+    # ORDEM IMPORTA. O canvas é montado ANTES de a linha do ``ScanJob`` existir.
+    #
+    # Era o contrário, e o resultado aparecia direto na cara do usuário: o
+    # canvas estourava (chord sem result backend), a API devolvia 500 dizendo
+    # "não foi possível iniciar o scan", e o scan aparecia no dashboard "em
+    # execução" — porque a linha já tinha sido gravada pelo passo anterior.
+    # Erro e evidência se contradiziam.
+    #
+    # Montar primeiro faz a falha acontecer enquanto ainda não há nada para
+    # desfazer: nenhuma linha é criada, e o dashboard não mostra um scan que
+    # nunca foi enfileirado.
     canvas = build_pipeline_canvas(
         commit_sha=commit_sha,
         repo_url=repo_url,
         pr_number=pr_number,
         installation_id=installation_id,
         repo_full_name=repo_full_name,
-        repo_path=repo_path,
         base_sha=base_sha,
         head_sha=head_sha,
         changed_files=changed_files,
         target_url=target_url,
     )
+
+    # Projeção consumível via API (GET /scans): cria o ScanJob com o Tier 1
+    # já em "running". Best-effort — falha de banco não impede o pipeline.
+    scan_job_writer.create_scan_job(
+        commit_sha=commit_sha,
+        repo_url=repo_url,
+        installation_id=installation_id,
+        pr_number=pr_number,
+        repo_full_name=repo_full_name,
+        user_id=user_id,
+        repository_id=repository_id,
+    )
+
+    try:
+        resultado = canvas.apply_async()
+    except Exception as exc:
+        # A linha já existe neste ponto. Deixá-la ``running`` recriaria o
+        # órfão: nada a concluiria, e a guarda de concorrência bloquearia
+        # aquele commit com 409 até a varredura de jobs travados.
+        logger.error(
+            "pipeline_dispatch_falhou",
+            commit_sha=commit_sha,
+            repo=repo_full_name,
+            error=str(exc),
+        )
+        scan_job_writer.fail_pending_tiers(commit_sha, motivo=f"dispatch: {exc}")
+        raise ScanDispatchError(
+            f"nao foi possivel enfileirar o pipeline do commit {commit_sha}: {exc}"
+        ) from exc
+
     logger.info(
         "pipeline_dispatched",
         commit_sha=commit_sha,
         pr_number=pr_number,
         repo=repo_full_name,
     )
-    return canvas.apply_async()
+    return resultado

@@ -14,6 +14,7 @@ from app.infrastructure.persistence.models import (  # noqa: F401 — needed for
     finding_model,
     remediation_model,
     scan_job_model,
+    scan_tool_run_model,
 )
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,

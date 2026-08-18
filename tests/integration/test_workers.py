@@ -237,6 +237,7 @@ class TestGate1PersisteOBloqueio:
             refresh_token_model,
             remediation_model,
             scan_job_model,
+            scan_tool_run_model,
             user_model,
         )
         from app.infrastructure.persistence.models.base import Base

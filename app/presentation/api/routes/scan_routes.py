@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.domain.finding.entities import Finding
+from app.domain.scan.tool_catalog import TIER_TOOLS
 from app.infrastructure.database.sqlalchemy import get_db
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,
@@ -25,14 +26,20 @@ from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
 from app.infrastructure.repositories.sqlalchemy_scan_report_repository import (
     SQLAlchemyScanReportRepository,
 )
+from app.infrastructure.repositories.sqlalchemy_scan_tool_run_repository import (
+    SQLAlchemyScanToolRunRepository,
+)
 from app.presentation.api.dependencies.auth import get_current_user
 from app.presentation.schemas.scan_schema import (
     FindingsSummary,
+    ScanIaSummary,
     ScanJobPage,
     ScanJobResponse,
     ScanJobSummary,
     ScanReportResponse,
     ScanReportsResponse,
+    ScanToolRunResponse,
+    ScanToolsResponse,
 )
 
 router = APIRouter(
@@ -174,6 +181,59 @@ def get_scan_reports(
         scan_id=job.id,
         commit_sha=job.commit_sha,
         reports=[ScanReportResponse.from_entity(r) for r in reports],
+    )
+
+
+@router.get(
+    "/{scan_id}/tools",
+    response_model=ScanToolsResponse,
+    summary="Listar o status de cada ferramenta do pipeline nesta execucao",
+    responses={
+        404: {
+            "description": "Scan nao encontrado.",
+            "content": {"application/json": {"example": {"detail": "Scan nao encontrado"}}},
+        }
+    },
+)
+def get_scan_tools(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> ScanToolsResponse:
+    """Retorna uma linha por ferramenta ja' executada (ou pulada) nesta execucao.
+
+    Complementa `tier{1,2,3}_status` do scan: o tier diz em que etapa o pipeline
+    esta, isto diz o que aconteceu com cada ferramenta dentro dela — inclusive
+    a diferenca entre "rodou e nao achou nada" (`status=done`,
+    `findings_count=0`) e "quebrou" (`status=failed`, `reason` com o tipo da
+    excecao), que antes se perdia no `return []` do `run_safe`.
+
+    **Lista vazia e' resposta legitima**, e significa uma de duas coisas: o
+    pipeline ainda nao chegou a nenhuma ferramenta, ou a execucao e' anterior a
+    migration que criou a tabela (nada foi backfillado). Em ambos os casos o
+    cliente cai para o status do tier — por isso `expected` sempre vem
+    preenchido, mesmo quando `tools` esta vazio.
+
+    `ia` traz o resumo da camada de I.A do Tier 3 quando existe relatorio desse
+    tier (`None` caso contrario). E' um resumo, nao o `analysis_json`: o blob
+    carrega o array `findings` completo com `raw_output`, e esta rota e' chamada
+    uma vez por card da lista de Scans.
+    """
+    job = _owned_job_or_404(db, scan_id, user_id)
+    runs = SQLAlchemyScanToolRunRepository(db).list_by_scan_job(job.id)
+    # Reaproveita o repositorio de relatorios: o resumo de I.A e' derivado do
+    # relatorio de tier 3 desta execucao, sem estado proprio em lugar nenhum.
+    relatorio_tier3 = SQLAlchemyScanReportRepository(db).get_by_scan_job_and_tier(job.id, 3)
+    return ScanToolsResponse(
+        scan_id=job.id,
+        commit_sha=job.commit_sha,
+        tools=[ScanToolRunResponse.from_entity(r) for r in runs],
+        expected={str(tier): list(tools) for tier, tools in sorted(TIER_TOOLS.items())},
+        ia=(
+            ScanIaSummary.from_analysis(relatorio_tier3.analysis_json)
+            if relatorio_tier3 is not None
+            else None
+        ),
     )
 
 

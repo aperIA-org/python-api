@@ -31,6 +31,8 @@ import structlog
 from app.core.celery_app import celery_app
 from app.core.exceptions import SandboxViolationError
 from app.domain.finding.entities import Finding
+from app.domain.scan.value_objects import ToolStatus
+from app.infrastructure.persistence import scan_tool_run_writer
 from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.intelligence.mitre_caldera_client import CalderaClient
 from app.infrastructure.intelligence.threat_intel_client import ThreatIntelClient
@@ -135,6 +137,8 @@ def run_tier3_scan(
     zap_findings: list[Finding] = []
     if target_url:
         zap_findings = ZAPScanner().run_safe(
+            tool_id="zap",
+            tier=3,
             target_url=target_url,
             commit_sha=commit_sha,
             repo_url=repo_url,
@@ -145,10 +149,25 @@ def run_tier3_scan(
             commit_sha=commit_sha,
             reason="no_target_url",
         )
+        # Sem alvo o DAST não roda, mas o Tier 3 fecha como `done` mesmo assim —
+        # e aí o dashboard mostrava o ZAP como concluído. Esta linha é o que
+        # separa "escaneou e não achou nada" de "não tinha o que escanear".
+        scan_tool_run_writer.record_tool_run(
+            commit_sha=commit_sha,
+            tier=3,
+            tool="zap",
+            status=ToolStatus.SKIPPED,
+            reason="no_target_url",
+        )
 
     persistir_ou_falhar(zap_findings, commit_sha=commit_sha, tier=3)
 
     # ---- Threat Intel (KEV + EPSS) por CVE ----
+    # `running` antes de comecar: e' o que deixa o dashboard mostrar QUAL
+    # ferramenta esta' em execucao, em vez de deduzir pela ordem do pipeline.
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha, tier=3, tool="threat-intel", status=ToolStatus.RUNNING
+    )
     cves = _collect_cves(t2_findings)
     cti_results: list[dict | None] = []
     if cves:
@@ -158,6 +177,9 @@ def run_tier3_scan(
     cti_merged = _merge_cti(cti_results)
 
     # ---- Caldera ----
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha, tier=3, tool="caldera", status=ToolStatus.RUNNING
+    )
     caldera_results: dict[str, Any]
     try:
         # União das duas fontes, cadeia do Tier 2 primeiro.
@@ -195,6 +217,31 @@ def run_tier3_scan(
             "tecnicas_por_pai": [],
             "tecnicas_sem_cobertura": [],
         }
+
+    # Threat intel e Caldera não passam por `run_safe` (um é um cliente HTTP em
+    # laço por CVE, o outro devolve um dict com `status` próprio), então o
+    # registro é feito aqui, a partir do desfecho que o worker já calculou.
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha,
+        tier=3,
+        tool="threat-intel",
+        status=ToolStatus.DONE if cti_merged else ToolStatus.SKIPPED,
+        # Sem CVE nos findings do Tier 2 não há o que enriquecer — é pulo por
+        # falta de entrada, não falha do feed.
+        reason=None if cti_merged else ("sem_cves" if not cves else "cti_indisponivel"),
+    )
+    _caldera_status = str(caldera_results.get("status") or "")
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha,
+        tier=3,
+        tool="caldera",
+        # `reachable` é o "ok" do CalderaClient.run_safe; qualquer outra coisa
+        # é falha (inclusive a violação de sandbox tratada acima).
+        status=ToolStatus.DONE if _caldera_status == "reachable" else ToolStatus.FAILED,
+        reason=None if _caldera_status == "reachable" else (
+            str(caldera_results.get("reason") or _caldera_status or "indisponivel")
+        ),
+    )
 
     logger.info(
         "tier3_scan_complete",

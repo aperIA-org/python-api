@@ -13,12 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.infrastructure.persistence.models.base import Base  # noqa: E402
 
 # Import every model that should be picked up by autogenerate.
+#
+# A lista precisa ser COMPLETA. Um model ausente daqui nao entra no
+# `Base.metadata`, e o autogenerate compara o banco contra um metadata
+# incompleto: a tabela existe no banco, nao existe no metadata, e ele conclui
+# que foi removida. `github_accounts`, `repositories` e `scan_reports`
+# faltavam, entao um `alembic revision --autogenerate` emitiria `drop_table`
+# para as tres — e `alembic check` acusava drift que nao existia.
 from app.infrastructure.persistence.models import (  # noqa: E402, F401
     finding_model,
-    remediation_model,
-    scan_job_model,
-    user_model,
+    github_account_model,
     refresh_token_model,
+    remediation_model,
+    repository_model,
+    scan_job_model,
+    scan_report_model,
+    scan_tool_run_model,
+    user_model,
 )
 
 config = context.config

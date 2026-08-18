@@ -1,5 +1,8 @@
+from unittest.mock import patch
+
 from app.domain.finding.entities import Finding
 from app.domain.finding.value_objects import Severity
+from app.domain.scan.value_objects import ToolStatus
 from app.infrastructure.scanners.base_scanner import BaseScanner
 
 
@@ -88,3 +91,83 @@ class TestAbstractContract:
 
     def test_default_timeout_120s(self):
         assert OkScanner.TIMEOUT == 120
+
+
+class TestRunSafeRegistraFerramenta:
+    """`run_safe` é o único ponto que sabe se a ferramenta rodou ou quebrou.
+
+    Depois do `return []` as duas situações são o mesmo valor — por isso o
+    registro em `scan_tool_runs` acontece aqui dentro, e não no call site.
+    """
+
+    def test_grava_running_antes_e_done_depois(self):
+        """Duas escritas, nesta ordem.
+
+        A primeira e' o que permite o dashboard dizer QUAL ferramenta esta'
+        rodando. Sem ela a linha so' nascia no fim, e durante o scan a tela
+        tinha que adivinhar pela ordem do pipeline.
+        """
+        with patch(
+            "app.infrastructure.persistence.scan_tool_run_writer.record_tool_run"
+        ) as rec:
+            OkScanner().run_safe(tool_id="trivy", tier=2, commit_sha="a" * 40)
+
+        assert rec.call_count == 2
+        primeiro, segundo = rec.call_args_list[0].kwargs, rec.call_args_list[1].kwargs
+
+        assert primeiro["status"] is ToolStatus.RUNNING
+        assert primeiro["started_at"] is not None
+        # `completed_at` fica None de proposito: a ferramenta nao terminou.
+        assert primeiro["completed_at"] is None
+
+        assert segundo["tool"] == "trivy"
+        assert segundo["tier"] == 2
+        assert segundo["status"] is ToolStatus.DONE
+        # 2, não None: rodou e achou dois.
+        assert segundo["findings_count"] == 2
+        assert segundo["duration_ms"] is not None
+        assert segundo["completed_at"] is not None
+
+    def test_falha_grava_failed_com_o_tipo_da_excecao(self):
+        with patch(
+            "app.infrastructure.persistence.scan_tool_run_writer.record_tool_run"
+        ) as rec:
+            BoomScanner().run_safe(tool_id="trivy", tier=2, commit_sha="a" * 40)
+
+        # A ultima escrita e' o desfecho; a primeira foi o `running`.
+        kw = rec.call_args_list[-1].kwargs
+        assert kw["status"] is ToolStatus.FAILED
+        assert "RuntimeError" in kw["reason"]
+        # Sem contagem: não houve varredura, e 0 seria mentira.
+        assert kw.get("findings_count") is None
+
+    def test_sem_tool_id_nao_grava_nada(self):
+        """Chamadas antigas (sem `tool_id`/`tier`) seguem funcionando."""
+        with patch(
+            "app.infrastructure.persistence.scan_tool_run_writer.record_tool_run"
+        ) as rec:
+            OkScanner().run_safe(commit_sha="a" * 40)
+        rec.assert_not_called()
+
+    def test_sem_commit_sha_nao_grava_nada(self):
+        with patch(
+            "app.infrastructure.persistence.scan_tool_run_writer.record_tool_run"
+        ) as rec:
+            OkScanner().run_safe(tool_id="trivy", tier=2)
+        rec.assert_not_called()
+
+    def test_tool_id_nao_vaza_para_o_scan(self):
+        """`tool_id`/`tier` são de instrumentação e não podem chegar ao scanner."""
+
+        class CaptureScanner(BaseScanner):
+            received = {}
+
+            def scan(self, *args, **kwargs):
+                CaptureScanner.received = kwargs
+                return []
+
+        with patch("app.infrastructure.persistence.scan_tool_run_writer.record_tool_run"):
+            CaptureScanner().run_safe(tool_id="zap", tier=3, commit_sha="a" * 40)
+
+        assert "tool_id" not in CaptureScanner.received
+        assert "tier" not in CaptureScanner.received

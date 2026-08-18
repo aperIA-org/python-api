@@ -26,11 +26,17 @@ from app.infrastructure.persistence.models import (  # noqa: F401 — bind metad
     refresh_token_model,
     remediation_model,
     scan_job_model,
+    scan_tool_run_model,
     user_model,
 )
 from app.infrastructure.persistence.models.base import Base
+from app.domain.scan.tool_catalog import TIER_TOOLS
+from app.domain.scan.value_objects import ToolStatus
 from app.infrastructure.repositories.sqlalchemy_scan_job_repository import (
     SQLAlchemyScanJobRepository,
+)
+from app.infrastructure.repositories.sqlalchemy_scan_tool_run_repository import (
+    SQLAlchemyScanToolRunRepository,
 )
 from app.presentation.workers import analysis_worker
 
@@ -285,6 +291,45 @@ class TestPersistenciaDaDecisao:
         ar = analysis_worker.tier3_gate.delay(_analysis([]))
         assert ar.state == "IGNORED"
         assert _job(persistence_on).tier3_status is None
+
+
+class TestFerramentasDoTierPulado:
+    """O pulo tem que descer até a ferramenta, não parar no tier.
+
+    Sem estas linhas, um Tier 3 pulado simplesmente não tem registro nenhum em
+    `scan_tool_runs`, e a UI não separa "o Gate 2 decidiu que não precisava" de
+    "ainda não chegou nesse tier" — exatamente a ambiguidade que
+    `mark_tier_skipped` já existe para evitar no nível do tier.
+    """
+
+    def test_skip_marca_todas_as_ferramentas_do_tier3(self, persistence_on):
+        with patch.object(
+            analysis_worker.scan_tool_run_writer, "SessionLocal", persistence_on
+        ):
+            analysis_worker.tier3_gate.delay(_analysis([], commit_sha=SHA))
+
+        with persistence_on() as s:
+            runs = SQLAlchemyScanToolRunRepository(s).list_by_scan_job(
+                _job(persistence_on).id
+            )
+        assert {r.tool for r in runs} == set(TIER_TOOLS[3])
+        assert {r.status for r in runs} == {ToolStatus.SKIPPED}
+        # O motivo diz QUAL gate segurou — é o que a tela mostra.
+        assert {r.reason for r in runs} == {"gate2_abaixo_do_limiar"}
+
+    def test_escalacao_nao_marca_ferramenta_como_pulada(self, persistence_on):
+        with patch.object(
+            analysis_worker.scan_tool_run_writer, "SessionLocal", persistence_on
+        ):
+            analysis_worker.tier3_gate.delay(
+                _analysis([_f(severity="critical")], commit_sha=SHA)
+            ).get()
+
+        with persistence_on() as s:
+            runs = SQLAlchemyScanToolRunRepository(s).list_by_scan_job(
+                _job(persistence_on).id
+            )
+        assert runs == []
 
 
 class TestCeleryRegistration:

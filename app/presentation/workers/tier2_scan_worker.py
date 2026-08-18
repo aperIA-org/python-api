@@ -34,7 +34,9 @@ import structlog
 from app.core.celery_app import celery_app
 from app.domain.finding.entities import Finding
 from app.domain.finding.services import FindingDeduplicator
+from app.domain.scan.value_objects import ToolStatus
 from app.infrastructure.git.repo_checkout import listar_arquivos_alterados
+from app.infrastructure.persistence import scan_tool_run_writer
 from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.scanners.prowler_scanner import (
     ProwlerScanner,
@@ -112,12 +114,16 @@ def run_tier2_scan(
         )
 
         trivy_findings: list[Finding] = TrivyScanner().run_safe(
+            tool_id="trivy",
+            tier=2,
             target=repo_path,
             commit_sha=commit_sha,
             repo_url=repo_url,
         )
 
         semgrep_findings: list[Finding] = _SemgrepExpandedAdapter().run_safe(
+            tool_id="semgrep-full",
+            tier=2,
             repo_path=repo_path,
             commit_sha=commit_sha,
             repo_url=repo_url,
@@ -126,6 +132,8 @@ def run_tier2_scan(
         prowler_findings: list[Finding] = []
         if has_iac_files(arquivos):
             prowler_findings = ProwlerScanner().run_safe(
+                tool_id="prowler",
+                tier=2,
                 provider=cloud_provider,
                 commit_sha=commit_sha,
                 repo_url=repo_url,
@@ -140,6 +148,16 @@ def run_tier2_scan(
             logger.info(
                 "tier2_prowler_skipped",
                 commit_sha=commit_sha,
+                reason="no_iac_files",
+            )
+            # O pulo do Prowler é uma DECISÃO do pipeline, não uma ausência de
+            # dado. Sem esta linha o Tier 2 fecha como `done` e o dashboard
+            # mostra o Prowler como concluído — uma ferramenta que não rodou.
+            scan_tool_run_writer.record_tool_run(
+                commit_sha=commit_sha,
+                tier=2,
+                tool="prowler",
+                status=ToolStatus.SKIPPED,
                 reason="no_iac_files",
             )
 

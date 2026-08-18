@@ -141,8 +141,8 @@ cat > /tmp/pr.json <<'JSON'
  "pull_request":{"number":1,
    "head":{"sha":"deadbeefcafebabe0000000000000000deadbeef"},
    "base":{"sha":"0000000000000000000000000000000000000000"}},
- "repository":{"full_name":"OCR-aperIA/demo-repo",
-   "clone_url":"https://github.com/OCR-aperIA/demo-repo.git"}}
+ "repository":{"full_name":"aperIA-org/demo-repo",
+   "clone_url":"https://github.com/aperIA-org/demo-repo.git"}}
 JSON
 
 SIG="sha256=$(openssl dgst -sha256 -hmac '' < /tmp/pr.json | sed 's/^.*= //')"

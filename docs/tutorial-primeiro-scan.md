@@ -82,8 +82,8 @@ cat > /tmp/pr.json <<'JSON'
  "pull_request":{"number":1,
    "head":{"sha":"deadbeefcafebabe0000000000000000deadbeef"},
    "base":{"sha":"0000000000000000000000000000000000000000"}},
- "repository":{"full_name":"OCR-aperIA/demo-repo",
-   "clone_url":"https://github.com/OCR-aperIA/demo-repo.git"}}
+ "repository":{"full_name":"aperIA-org/demo-repo",
+   "clone_url":"https://github.com/aperIA-org/demo-repo.git"}}
 JSON
 ```
 
@@ -128,7 +128,7 @@ conta Anthropic, o encanamento inteiro é exercitado — HMAC, fila, worker,
 persistência — mas a análise em si não vai longe. É esperado ver:
 
 - **Tier 1 falhando no checkout**: os workers clonam o commit antes de
-  escanear. Como `OCR-aperIA/demo-repo` e o SHA acima não existem (ou o App
+  escanear. Como `aperIA-org/demo-repo` e o SHA acima não existem (ou o App
   não tem acesso a eles), o log mostra `scan_checkout_falhou` e as tarefas
   falham — de propósito: sem os arquivos não há o que escanear, e concluir
   "0 findings" seria uma afirmação falsa. Os tiers pendentes são marcados

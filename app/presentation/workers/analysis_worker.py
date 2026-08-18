@@ -36,9 +36,36 @@ from app.infrastructure.ai.claude_client import (
 )
 from app.infrastructure.ai.models import REASONING
 from app.infrastructure.git.github_client import GitHubClient
+from app.domain.scan.tool_catalog import TIER_TOOLS
+from app.domain.scan.value_objects import ToolStatus
 from app.infrastructure.persistence import scan_job_writer
+from app.infrastructure.persistence import scan_tool_run_writer
 
 logger = structlog.get_logger()
+
+
+def _marcar_ferramentas_puladas(
+    commit_sha: str, tiers: tuple[int, ...], motivo: str
+) -> None:
+    """Marca como ``skipped`` todas as ferramentas dos tiers que um gate barrou.
+
+    Sem isso, um tier pulado simplesmente não teria linha em ``scan_tool_runs``,
+    e a UI não conseguiria separar "não rodou porque o gate decidiu" de "ainda
+    não chegou nesse tier" — que é exatamente a ambiguidade que
+    ``mark_tier_skipped`` já existe para evitar no nível do tier.
+
+    O ``motivo`` viaja junto para que a tela mostre QUAL gate segurou, e não só
+    que algo segurou.
+    """
+    for tier in tiers:
+        for tool in TIER_TOOLS.get(tier, ()):
+            scan_tool_run_writer.record_tool_run(
+                commit_sha=commit_sha,
+                tier=tier,
+                tool=tool,
+                status=ToolStatus.SKIPPED,
+                reason=motivo,
+            )
 
 
 def _has_verified_secret(findings: list[dict[str, Any]]) -> bool:
@@ -108,6 +135,7 @@ def gate1_check(
         scan_job_writer.mark_blocked(commit_sha, 1)
         scan_job_writer.mark_tier_skipped(commit_sha, 2)
         scan_job_writer.mark_tier_skipped(commit_sha, 3)
+        _marcar_ferramentas_puladas(commit_sha, (2, 3), "gate1_secret_verificado")
         # Interrompe o chain Celery — Tier 2 e Tier 3 não rodam.
         raise Ignore()
 
@@ -141,6 +169,9 @@ def tier2_analyze(
     """
     findings = gate1_output.get("findings", [])
     scan_job_writer.mark_tier(commit_sha, 2, "running")
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha, tier=2, tool="ia-tier2", status=ToolStatus.RUNNING
+    )
     user_prompt = prompts.chain_of_events.build(
         findings=findings,
         context={"commit": commit_sha},
@@ -166,6 +197,17 @@ def tier2_analyze(
         )
         # Modo degradado: retorna findings brutos sem narrativa.
         scan_job_writer.mark_tier(commit_sha, 2, "done")
+        # O tier fecha como `done` mesmo aqui — é de propósito, o pipeline segue
+        # com o plano B. Mas então "a I.A analisou" e "a I.A caiu e usamos a
+        # heurística" ficavam indistinguíveis; `degraded` na linha da ferramenta
+        # é o que preserva a diferença.
+        scan_tool_run_writer.record_tool_run(
+            commit_sha=commit_sha,
+            tier=2,
+            tool="ia-tier2",
+            status=ToolStatus.DEGRADED,
+            reason=type(exc).__name__,
+        )
         return {
             "degraded": True,
             "reason": type(exc).__name__,
@@ -185,6 +227,12 @@ def tier2_analyze(
     analysis["commit_sha"] = commit_sha
     scan_job_writer.mark_tier(commit_sha, 2, "done")
     scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha,
+        tier=2,
+        tool="ia-tier2",
+        status=ToolStatus.DONE,
+    )
     return analysis
 
 
@@ -333,6 +381,7 @@ def tier3_gate(
     # ``tier3_status`` fica NULL e o dashboard não distingue "pulado por
     # severidade baixa" de "ainda não chegou nesse tier".
     scan_job_writer.mark_tier_skipped(commit_sha, 3)
+    _marcar_ferramentas_puladas(commit_sha, (3,), "gate2_abaixo_do_limiar")
     raise Ignore()
 
 
@@ -398,6 +447,9 @@ def tier3_deep_analysis(
         context={"commit": commit_sha},
     )
 
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha, tier=3, tool="ia-tier3", status=ToolStatus.RUNNING
+    )
     client = ClaudeClient()
     try:
         analysis = client.call_json(
@@ -414,6 +466,13 @@ def tier3_deep_analysis(
             error_type=type(exc).__name__,
         )
         scan_job_writer.mark_tier(commit_sha, 3, "done")
+        scan_tool_run_writer.record_tool_run(
+            commit_sha=commit_sha,
+            tier=3,
+            tool="ia-tier3",
+            status=ToolStatus.DEGRADED,
+            reason=type(exc).__name__,
+        )
         return {
             "degraded": True,
             "reason": type(exc).__name__,
@@ -448,4 +507,10 @@ def tier3_deep_analysis(
     analysis["validacao_evidencia"] = validacao
     scan_job_writer.mark_tier(commit_sha, 3, "done")
     scan_job_writer.set_final_risk_from_analysis(commit_sha, analysis)
+    scan_tool_run_writer.record_tool_run(
+        commit_sha=commit_sha,
+        tier=3,
+        tool="ia-tier3",
+        status=ToolStatus.DONE,
+    )
     return analysis

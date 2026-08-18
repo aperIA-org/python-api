@@ -13,6 +13,7 @@ from app.infrastructure.persistence.models import (  # noqa: F401 bind metadata
     finding_model,
     remediation_model,
     scan_job_model,
+    scan_tool_run_model,
 )
 from app.infrastructure.persistence.models.base import Base
 from app.infrastructure.persistence.models.finding_model import FindingModel

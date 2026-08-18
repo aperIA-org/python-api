@@ -33,6 +33,7 @@ from app.infrastructure.persistence.models import (  # noqa: F401 — bind metad
     finding_model,
     remediation_model,
     scan_job_model,
+    scan_tool_run_model,
 )
 from app.infrastructure.persistence.models.base import Base
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (

@@ -204,8 +204,29 @@ Isso expõe Prometheus em `:9090` e Grafana em `:3000` (login `admin`/`changeme`
 docker compose -f docker-compose.base.yml exec api alembic upgrade head
 ```
 
-Sem esse passo, a tabela `findings` não existe e a persistência de findings
-cai no ramo best-effort (só loga um warning e segue).
+**Rode isso de novo toda vez que atualizar o código**, não só na primeira
+subida. Uma migration pendente é *silenciosa*: toda a persistência aqui é
+best-effort, então a tabela ausente vira um `warning` no log do worker e o
+pipeline segue como se nada tivesse acontecido. O sintoma aparece longe da
+causa — na tela.
+
+Dois exemplos reais desse mesmo mecanismo:
+
+| Migration pendente | O que você vê |
+|---|---|
+| `findings` | scan "conclui" sem nenhum finding |
+| `scan_tool_runs` | a faixa de ferramentas da tela de Scans diz "Sem status por ferramenta nesta execução" e cai para o status da etapa |
+
+Para checar qual revisão está aplicada:
+
+```bash
+docker compose -f docker-compose.base.yml exec db \
+  psql -U postgres -d aperia -tAc "select version_num from alembic_version"
+```
+
+Se ela não bater com o `head` do `alembic/versions/`, é isso. E os workers
+precisam ser reiniciados junto quando o código deles muda — a migration sozinha
+não basta.
 
 ## 5. Confirmar que subiu
 

@@ -336,7 +336,7 @@ ZAP + verificação de segredo e o Caldera fica para host/infra?
 | Remediações | mock | **não existe rota na API** |
 | AI Emulation | mock | sai do `analysis_json` do relatório de Tier 3 |
 | Time | mock | **não existe rota na API** |
-| Scanners (em Repositórios) | mock | não há estado por scanner na API |
+| Scanners (em Repositórios) | mock | `GET /scans/{id}/tools` já existe (§6.2) — falta a tela ler |
 
 Todas carregam `<DemoDataBadge />` quando a conexão é real — o badge sai quando
 a tela passar a ler a API.
@@ -400,6 +400,71 @@ e joga fora o dado mais útil do ZAP.
 **Próximo passo.** Duas frentes: na UI, agrupar por `secret_type` + valor com
 contagem e expansão; no mapeamento do ZAP, preservar a URL (em `file_path` ou
 campo próprio) para o dedup não colapsar rotas distintas.
+
+---
+
+## 6.2 Status por ferramenta — FEITO (2026-08-17)
+
+`scan_tool_runs` (migration `a7b8c9d0e1f2`) + `GET /scans/{id}/tools`.
+
+**O problema.** `ScanJob` só tinha `tier{1,2,3}_status`, então o dashboard sabia
+dizer "o Tier 2 concluiu" e nunca "o Trivy concluiu e o Prowler não rodou". Pior
+que a granularidade: `BaseScanner.run_safe` engole a exceção e devolve `[]`, de
+modo que **"rodou e não achou nada" e "quebrou" chegavam ao banco como o mesmo
+valor**. A diferença existia só na linha do structlog — e os motivos de pulo que
+o pipeline já decide (`no_iac_files` do Prowler, `no_target_url` do ZAP) também.
+
+**Onde o registro acontece, e por quê.** Nos scanners, dentro do próprio
+`run_safe` (`base_scanner.py`): é o único ponto onde a exceção ainda existe.
+Depois do `return []` a informação já foi perdida, então nenhum call site
+conseguiria gravá-la. Os call sites passam apenas `tool_id` e `tier`, porque o
+Semgrep roda em dois tiers com escopos diferentes e precisa ser duas ferramentas
+(`semgrep-changed`, `semgrep-full`). Threat intel, Caldera e os dois passos de
+I.A não passam por `run_safe` e são registrados no worker, a partir do desfecho
+que ele já calcula.
+
+**Os gates marcam as ferramentas dos tiers que barraram** (`skipped` +
+`gate1_secret_verificado` / `gate2_abaixo_do_limiar`). Sem isso um tier pulado
+não teria linha nenhuma, e "o gate decidiu que não precisava" ficaria
+indistinguível de "ainda não chegou aqui" — a mesma ambiguidade que
+`mark_tier_skipped` já existe para evitar no nível do tier.
+
+**Chave `(scan_job_id, tool)`, nunca `commit_sha`.** Rescanear a mesma branch
+empilha execução; chavear pelo sha faria o upsert apagar o resultado anterior —
+o erro que `scan_reports` já corrigiu.
+
+**`status` inclui `degraded`**, que não existe no nível do tier: quando o Claude
+falha, o passo de I.A cai para a heurística e o tier fecha como `done` mesmo
+assim. Sem esse valor, "a I.A analisou" e "a I.A caiu e seguimos com o plano B"
+seriam a mesma coisa.
+
+**Nada foi backfillado.** Execuções anteriores à migration respondem com
+`tools: []`, e o cliente cai para o status do tier — por isso `expected` (o
+catálogo por tier) vem preenchido mesmo com a lista vazia.
+
+**A mesma rota devolve `ia`: o resumo da camada de I.A do Tier 3** (2026-08-18),
+derivado do `analysis_json` do relatório daquele tier — attack path (fase, TTP
+MITRE, descrição, se o Caldera validou), `kill_chain_complete`, risco ajustado,
+CTI (KEV/EPSS/TTPs) e emulação. `null` quando não existe relatório de tier 3.
+
+É um **resumo**, e isso é obrigatório, não estilo: o `analysis_json` carrega o
+array `findings` inteiro com o `raw_output` de cada um (centenas de KB), e a
+lista de Scans do dashboard chama esta rota uma vez por card (até 12). Ficaram
+fora `findings`, `validacao_evidencia` e `prioritized_actions`; de cada passo do
+attack path sai `finding_count` em vez de `finding_ids`, que é uma lista de
+strings longas legíveis por humano. Uma resposta típica fica em ~1 KB.
+
+Veio junto de `tools` em vez de virar rota nova porque responde à mesma pergunta
+("o que aconteceu nesta execução?") e a tela já faz essa chamada — separar seria
+um segundo round-trip por card.
+
+**O blob é JSON produzido por LLM, então nada nele é confiável.** O parse
+(`ScanIaSummary.from_analysis`) é best-effort campo a campo, com `isinstance`:
+chave ausente, `null`, string onde se espera lista, item que não é objeto — tudo
+degrada para o default e nunca vira 500. O caso degradado é real e existe no
+banco: quando o Claude falha, o worker grava só `reason`/`cti_data`/`degraded`/
+`findings`, sem `attack_path` nem `risk_score_adjusted`. Blocos ausentes saem
+`null` em vez de zerados, para que "não rodou" não pareça "rodou e falhou".
 
 ---
 

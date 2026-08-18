@@ -26,6 +26,7 @@ from app.infrastructure.persistence.models import (  # noqa: F401 — registra m
     refresh_token_model,
     remediation_model,
     scan_job_model,
+    scan_tool_run_model,
     user_model,
 )
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (

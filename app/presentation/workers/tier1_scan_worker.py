@@ -74,6 +74,8 @@ def run_trufflehog(
         base_sha=base_sha,
     ) as repo_path:
         findings = TruffleHogScanner().run_safe(
+            tool_id="trufflehog",
+            tier=1,
             repo_path=repo_path,
             base_sha=base_sha,
             head_sha=head_sha,
@@ -132,6 +134,11 @@ def run_semgrep_changed(
             repo_path, base_sha=base_sha, head_sha=commit_sha
         )
         findings = SemgrepScanner().run_safe(
+            # `semgrep-changed`, não `semgrep`: o mesmo scanner roda de novo no
+            # Tier 2 sobre a árvore inteira, e as duas rodadas são ferramentas
+            # distintas do ponto de vista de quem lê o pipeline.
+            tool_id="semgrep-changed",
+            tier=1,
             repo_path=repo_path,
             changed_files=alvos,
             commit_sha=commit_sha,

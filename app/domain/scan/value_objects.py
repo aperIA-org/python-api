@@ -16,6 +16,24 @@ class TierStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class ToolStatus(str, Enum):
+    """Desfecho de UMA ferramenta dentro de um tier.
+
+    Espelha ``TierStatus`` de propósito — a tela mostra os dois lado a lado —
+    mas acrescenta ``DEGRADED``, que só existe no nível da ferramenta: os
+    passos de I.A caem para uma heurística quando o Claude falha, e o tier
+    fecha como ``done`` mesmo assim. Sem esse valor, "a I.A respondeu" e "a I.A
+    caiu e o pipeline seguiu com o plano B" ficariam indistinguíveis.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    DEGRADED = "degraded"
+
+
 @dataclass(frozen=True)
 class RepoUrl:
     value: str

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -193,6 +194,86 @@ def test_modo_filesystem_sem_base_real(fixture_jsonl, base):
     assert "/tmp/repo" in args
     assert "--since-commit" not in args
     assert "--branch" not in args
+
+
+def test_filesystem_exclui_git(fixture_jsonl):
+    """`.git` fora do escopo no modo filesystem.
+
+    O working tree do checkout inclui `.git`, entao todo segredo era reportado
+    duas vezes: no arquivo real e no blob correspondente em `.git/objects/`.
+    Num alvo de teste, 16 findings eram 4 valores distintos — ruido que ainda
+    inflava os prompts dos Tiers 2 e 3.
+    """
+    # O conteudo tem de ser lido DURANTE a chamada: o arquivo e temporario e
+    # some no fim do scan (ver `test_arquivo_de_exclusoes_e_removido_apos_o_scan`).
+    conteudo = {}
+
+    def _ler_exclusoes(args, **kwargs):
+        caminho = args[args.index("--exclude-paths") + 1]
+        with open(caminho, encoding="utf-8") as fh:
+            conteudo["texto"] = fh.read()
+        return _fake_completed_process(fixture_jsonl)
+
+    with patch(
+        "app.infrastructure.scanners.trufflehog_scanner.subprocess.run",
+        side_effect=_ler_exclusoes,
+    ) as run_mock:
+        TruffleHogScanner().scan(
+            repo_path="/tmp/repo",
+            base_sha="",
+            head_sha="bbb",
+            commit_sha="a" * 40,
+            repo_url="https://github.com/acme/repo",
+        )
+
+    assert "--exclude-paths" in run_mock.call_args[0][0]
+    # O `-x` do TruffleHog recebe um ARQUIVO com um regex por linha, nao o
+    # padrao direto — passar o regex aqui falharia em silencio.
+    assert r"(^|/)\.git/" in conteudo["texto"]
+
+
+def test_modo_git_nao_exclui_nada(fixture_jsonl):
+    """O modo `git` percorre commits, nao o diretorio: nao ha `.git` a excluir.
+
+    E excluir ali seria pior que inutil — o padrao poderia casar caminhos
+    legitimos do historico.
+    """
+    with patch(
+        "app.infrastructure.scanners.trufflehog_scanner.subprocess.run",
+        return_value=_fake_completed_process(fixture_jsonl),
+    ) as run_mock:
+        TruffleHogScanner().scan(
+            repo_path="/tmp/repo",
+            base_sha="aaa",
+            head_sha="bbb",
+            commit_sha="a" * 40,
+            repo_url="https://github.com/acme/repo",
+        )
+
+    assert "--exclude-paths" not in run_mock.call_args[0][0]
+
+
+def test_arquivo_de_exclusoes_e_removido_apos_o_scan(fixture_jsonl):
+    """Quem cria remove — mesmo padrao do checkout."""
+    capturado = {}
+
+    def _capturar(args, **kwargs):
+        capturado["caminho"] = args[args.index("--exclude-paths") + 1]
+        return _fake_completed_process(fixture_jsonl)
+
+    with patch(
+        "app.infrastructure.scanners.trufflehog_scanner.subprocess.run",
+        side_effect=_capturar,
+    ):
+        TruffleHogScanner().scan(
+            repo_path="/tmp/repo",
+            base_sha="",
+            head_sha="bbb",
+            commit_sha="a" * 40,
+            repo_url="https://github.com/acme/repo",
+        )
+
+    assert not os.path.exists(capturado["caminho"])
 
 
 def test_run_safe_returns_empty_on_subprocess_timeout():

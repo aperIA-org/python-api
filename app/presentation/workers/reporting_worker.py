@@ -151,11 +151,26 @@ REGRAS:
    técnica da MESMA FAMÍLIA da encontrada, não ela. Trate como não validado.
 4. Para CADA passo do attack_path, mostre fase + TTP MITRE + descrição + se foi validado pelo Caldera.
 5. Liste as prioritized_actions em ordem (1, 2, 3...).
-6. Tom: técnico, direto, acionável; máximo 40 linhas de markdown.
-7. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
+6. Abra com o "executive_verdict" quando ele vier no JSON: a "headline" como
+   primeira linha e a "recommendation" em negrito. Se a chave NÃO vier (análise
+   antiga ou degradada), omita a seção inteira — não escreva um veredito seu.
+   Mesma regra para "remediation_effort", "recommended_deadline" e
+   "business_impact".
+7. "business_impact" vira a seção "Impacto ao negócio", ANTES do attack path:
+   a "headline" em negrito e cada item de "areas" como um bullet
+   "<title> — <detail>". Reproduza o texto como veio; ele já está sem jargão de
+   propósito, e reescrevê-lo em termos técnicos desfaz a tradução.
+8. Tom: técnico, direto, acionável; máximo 40 linhas de markdown.
+9. NÃO use emojis nem ícones — o relatório é documento técnico e vai para PR, dashboard e export.
 
 Formato:
 ## aperIA — Análise Profunda (Tier 3)
+
+**Veredito:** <headline> — **<recommendation>**
+(esforço <effort.level>, <effort.label> · prazo <deadline.label>)
+
+**Impacto ao negócio:** <business_impact.headline>
+- <area.title> — <area.detail>
 
 **Risk Score (ajustado):** <score>/100 (<level>) — kill chain <completa|incompleta>
 

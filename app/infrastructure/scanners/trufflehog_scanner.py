@@ -1,5 +1,7 @@
 import json
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import structlog
@@ -32,6 +34,41 @@ def _caminho_no_repo(caminho: str | None, repo_path: str) -> str | None:
     except ValueError:
         # Fora da árvore do checkout: devolve como veio em vez de inventar.
         return caminho
+
+
+# Regexes de caminho que o modo `filesystem` não deve varrer.
+#
+# `.git` é o caso que importa. O modo `filesystem` varre o working tree, e o
+# working tree do checkout inclui o diretório `.git` — então todo segredo era
+# reportado DUAS vezes: uma no arquivo real (`app/config.py`) e outra no blob
+# correspondente (`.git/objects/16/87f7c3…`). Num alvo de teste, 16 findings
+# eram 4 valores distintos.
+#
+# Não é só ruído de contagem. Os findings duplicados entram no prompt do Tier 2
+# e no do Tier 3, inflando entrada e saída de uma análise que já é limitada por
+# `max_tokens` — e o caminho `.git/objects/…` não diz a ninguém onde corrigir o
+# problema, porque não é um arquivo que alguém edita.
+#
+# O modo `git` não precisa disso: ele já percorre commits, não o diretório.
+_EXCLUIR_DO_FILESYSTEM = (
+    r"(^|/)\.git/",
+)
+
+
+@contextmanager
+def _arquivo_de_exclusoes(padroes: tuple[str, ...]):
+    """Materializa os regexes num arquivo temporário, que é o que o `-x` aceita.
+
+    O TruffleHog não recebe padrão por argumento: `--exclude-paths` quer um
+    caminho para arquivo com um regex por linha. O arquivo é apagado no `finally`
+    — mesmo padrão do checkout, quem cria remove.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="trufflehog-exclude-", delete=True
+    ) as fh:
+        fh.write("\n".join(padroes) + "\n")
+        fh.flush()
+        yield fh.name
 
 
 class TruffleHogScanner(BaseScanner):
@@ -87,16 +124,31 @@ class TruffleHogScanner(BaseScanner):
                 "--branch",
                 head_sha,
             ]
+            result = subprocess.run(
+                ["trufflehog", *args, "--json", "--no-update"],
+                capture_output=True,
+                text=True,
+                timeout=self.TIMEOUT,
+            )
         else:
             modo = "filesystem"
             args = ["filesystem", repo_path]
-
-        result = subprocess.run(
-            ["trufflehog", *args, "--json", "--no-update"],
-            capture_output=True,
-            text=True,
-            timeout=self.TIMEOUT,
-        )
+            # Só o modo `filesystem` precisa excluir `.git` — ver
+            # `_EXCLUIR_DO_FILESYSTEM`.
+            with _arquivo_de_exclusoes(_EXCLUIR_DO_FILESYSTEM) as exclusoes:
+                result = subprocess.run(
+                    [
+                        "trufflehog",
+                        *args,
+                        "--exclude-paths",
+                        exclusoes,
+                        "--json",
+                        "--no-update",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.TIMEOUT,
+                )
 
         findings: list[Finding] = []
         verificados = 0

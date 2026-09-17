@@ -25,6 +25,7 @@ from typing import Any
 import structlog
 from celery.exceptions import Ignore
 
+from app.config import settings
 from app.core.celery_app import celery_app
 from app.domain.finding import validation
 from app.infrastructure.ai import prompts
@@ -186,6 +187,7 @@ def tier2_analyze(
             system=prompts.chain_of_events.SYSTEM,
             user=user_prompt,
             model=REASONING,
+            max_tokens=settings.CLAUDE_MAX_TOKENS_REASONING,
             commit_sha=commit_sha,
         )
     except (CircuitOpenError, GuardBlockedError, ClaudeClientError) as exc:
@@ -456,6 +458,7 @@ def tier3_deep_analysis(
             system=prompts.attack_path.SYSTEM,
             user=user_prompt,
             model=REASONING,
+            max_tokens=settings.CLAUDE_MAX_TOKENS_REASONING,
             commit_sha=commit_sha,
         )
     except (CircuitOpenError, GuardBlockedError, ClaudeClientError) as exc:

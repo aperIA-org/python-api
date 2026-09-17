@@ -21,6 +21,8 @@ para o LLM Guard antes de chegar aqui.
 """
 from __future__ import annotations
 
+from app.infrastructure.ai.prompts._findings_limit import limitar
+
 SYSTEM = """Você é um analista de segurança ofensiva sênior atuando em modo red team.
 
 Sua tarefa: correlacionar findings de segurança e construir uma cadeia de eventos de ataque possíveis. Mapeie cada passo para uma técnica MITRE ATT&CK quando aplicável (formato TXXXX).
@@ -76,10 +78,19 @@ def build(findings: list[dict], context: dict | None = None) -> str:
     """Constrói o user prompt para chain-of-events.
 
     O argumento ``context`` aceita ``{"commit": <sha>}`` opcionalmente.
+
+    Os findings passam por ``_findings_limit.limitar`` — ver o módulo para o
+    porquê. A contagem exibida é a **total**, não a da amostra: dizer
+    "Findings (60)" quando o commit tem 102 seria esconder o corte do próprio
+    modelo que precisa saber dele.
     """
     ctx = context or {}
     commit = ctx.get("commit", "N/A")
+    incluidos, nota = limitar(findings)
+    cabecalho = f"Commit: {commit}\n\n"
+    if nota:
+        cabecalho += f"{nota}\n\n"
     return (
-        f"Commit: {commit}\n\n"
-        f"Findings ({len(findings)}):\n{_format_findings(findings)}\n"
+        f"{cabecalho}"
+        f"Findings ({len(findings)}):\n{_format_findings(incluidos)}\n"
     )

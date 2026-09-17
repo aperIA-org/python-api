@@ -1,10 +1,11 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.domain.finding.value_objects import Severity
-from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner
+from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner, SemgrepConfigError
 
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
@@ -118,7 +119,14 @@ class TestScanChanged:
         info = next(f for f in findings if "print-statement" in f.title)
         assert info.severity is Severity.LOW
 
-    def test_command_uses_security_audit_config_at_tier1(self, security_audit_json):
+    def test_command_uses_default_config_at_tier1(self, security_audit_json):
+        """Tier 1 roda `p/default`, nao `p/security-audit`.
+
+        `p/security-audit` e estreito: contra o repo-alvo de demonstracao ele
+        acha 5 dos 16 problemas plantados e deixa passar SQLi, XSS, JWT com
+        `alg=none`, path traversal, SSRF e MD5. `p/default` acha 40 no mesmo
+        repositorio.
+        """
         with patch(
             "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
             return_value=_completed(security_audit_json),
@@ -132,7 +140,7 @@ class TestScanChanged:
 
         args = run_mock.call_args[0][0]
         assert args[0] == "semgrep"
-        assert "--config=p/security-audit" in args
+        assert "--config=p/default" in args
         assert "--json" in args
         # changed_files appended
         assert "a.py" in args and "b.py" in args
@@ -246,3 +254,98 @@ def test_cwe_sem_identificador_e_truncado():
 
     esquisito = "descricao sem identificador " * 10
     assert len(_normalizar_cwe(esquisito)) <= 50
+
+
+class TestErroDeConfigNaoViraZero:
+    """Erro de regra tem de virar FALHA, nunca `results: []`.
+
+    Regressao do incidente: com o Semgrep 1.62.0, o registro passou a servir
+    regras de severidade `MEDIUM`, aquela versao recusou a regra, e UMA regra
+    invalida aborta a config inteira. O parser so lia `results`, entao o Tier 2
+    registrava `done` com 0 findings sobre um repositorio com SQLi, XSS, SSRF e
+    JWT quebrado — silencio indistinguivel de "repositorio limpo".
+    """
+
+    ERRO_DE_SCHEMA = json.dumps({
+        "results": [],
+        "errors": [
+            {
+                "code": 4,
+                "type": "InvalidRuleSchemaError",
+                "long_msg": "'MEDIUM' is not one of ['ERROR', 'WARNING', 'INFO']",
+            },
+            {"code": 7, "type": "SemgrepError", "message": "invalid configuration file found"},
+        ],
+    })
+
+    def test_cai_para_o_fallback_quando_a_config_principal_quebra(self, security_audit_json):
+        respostas = [_completed(self.ERRO_DE_SCHEMA), _completed(security_audit_json)]
+        with patch(
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            side_effect=respostas,
+        ) as run_mock:
+            findings = SemgrepScanner().scan_expanded(
+                repo_path="/tmp/repo",
+                commit_sha="a" * 40,
+                repo_url="https://github.com/x/y",
+            )
+
+        assert run_mock.call_count == 2
+        assert "--config=auto" in run_mock.call_args_list[0][0][0]
+        assert "--config=p/security-audit" in run_mock.call_args_list[1][0][0]
+        # O resgate entrega cobertura de verdade, nao lista vazia.
+        assert findings
+
+    def test_levanta_quando_o_fallback_tambem_quebra(self):
+        with patch(
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            return_value=_completed(self.ERRO_DE_SCHEMA),
+        ):
+            with pytest.raises(SemgrepConfigError) as exc:
+                SemgrepScanner().scan_expanded(
+                    repo_path="/tmp/repo",
+                    commit_sha="a" * 40,
+                    repo_url="https://github.com/x/y",
+                )
+        assert "MEDIUM" in str(exc.value)
+
+    def test_run_safe_marca_failed_em_vez_de_done_com_zero(self):
+        """A excecao vira `failed` na tela, que e o ponto todo.
+
+        `done` com 0 findings afirma que o repositorio esta limpo; `failed` diz
+        que ninguem olhou. Sao coisas diferentes e a tela precisa distinguir.
+        """
+        with patch(
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            return_value=_completed(self.ERRO_DE_SCHEMA),
+        ):
+            findings = SemgrepScanner().run_safe(
+                tool_id="semgrep-full",
+                tier=2,
+                repo_path="/tmp/repo",
+                changed_files=[],
+                commit_sha="a" * 40,
+                repo_url="https://github.com/x/y",
+            )
+        # `run_safe` engole a excecao e devolve [], mas registra o desfecho real.
+        assert findings == []
+
+    def test_erro_de_arquivo_nao_e_erro_de_config(self, security_audit_json):
+        """Arquivo que nao parseia e normal e nao pode disparar o fallback.
+
+        Sintaxe quebrada ou linguagem nao suportada acontece em repositorio real
+        e nao invalida a varredura. Por isso o filtro e por TIPO de erro.
+        """
+        payload = json.loads(security_audit_json)
+        payload["errors"] = [{"code": 3, "type": "SourceParseError", "message": "cannot parse"}]
+        with patch(
+            "app.infrastructure.scanners.semgrep_scanner.subprocess.run",
+            return_value=_completed(json.dumps(payload)),
+        ) as run_mock:
+            findings = SemgrepScanner().scan_expanded(
+                repo_path="/tmp/repo",
+                commit_sha="a" * 40,
+                repo_url="https://github.com/x/y",
+            )
+        assert run_mock.call_count == 1
+        assert findings

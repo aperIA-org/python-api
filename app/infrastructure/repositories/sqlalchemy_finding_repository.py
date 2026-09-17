@@ -472,3 +472,34 @@ class SQLAlchemyFindingRepository(FindingRepository):
         )
         stmt = select(func.count()).select_from(FindingModel).where(*filters)
         return self.db.execute(stmt).scalar_one()
+
+    def count_by_commits(
+        self, commit_shas: list[str], *, user_id: UUID | None = None
+    ) -> dict[str, int]:
+        """Quantos findings cada commit tem, em UMA query agregada.
+
+        Existe para a listagem de scans poder mostrar a contagem por execucao
+        sem uma requisicao por card: sao ate' 200 scans por pagina, e um
+        ``count`` por commit seria N+1 no caminho mais quente do dashboard.
+
+        Commit sem finding nenhum NAO aparece no dicionario — quem chama
+        distingue "zero findings" de "nao perguntamos", que sao coisas
+        diferentes na tela. Escopo multi-tenant pelo ``user_id``, igual ao
+        ``count``: o mesmo sha pode existir no scan de outro usuario (fork).
+        """
+        if not commit_shas:
+            return {}
+
+        filters = [FindingModel.commit_sha.in_(set(commit_shas))]
+        if user_id is not None:
+            filters.append(
+                FindingModel.commit_sha.in_(
+                    select(ScanJobModel.commit_sha).where(ScanJobModel.user_id == user_id)
+                )
+            )
+        stmt = (
+            select(FindingModel.commit_sha, func.count())
+            .where(*filters)
+            .group_by(FindingModel.commit_sha)
+        )
+        return {sha: total for sha, total in self.db.execute(stmt).all()}

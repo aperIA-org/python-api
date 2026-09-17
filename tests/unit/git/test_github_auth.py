@@ -76,3 +76,44 @@ class TestGetInstallationToken:
             with patch.object(jwt, "encode", return_value="x"):
                 with pytest.raises(Exception):
                     github_auth.get_installation_token(1)
+
+
+class TestRS256EstaDisponivel:
+    """O ambiente precisa CONSEGUIR assinar em RS256, nao so pedir por ele.
+
+    Regressao real: `requirements.txt` declarava `PyJWT` sem o extra `[crypto]`,
+    e o RS256 so funcionava porque o `pip install semgrep prowler` do Dockerfile
+    arrastava `cryptography` para o Python do sistema. Ao isolar as duas
+    ferramentas em venvs proprios, a dependencia acidental sumiu e
+    `POST /repositories/{id}/scan` passou a devolver 502 com
+    "Algorithm 'RS256' could not be found".
+
+    Os testes acima nao pegaram isso porque MOCKAM `jwt.encode`: eles verificam
+    que pedimos `algorithm="RS256"`, nao que a biblioteca consegue cumprir. Um
+    mock sempre consegue. Estes dois exercitam a capacidade real.
+    """
+
+    def test_pyjwt_registra_rs256(self):
+        """`RS256` so entra no registro do PyJWT quando `cryptography` existe."""
+        assert "RS256" in jwt.algorithms.get_default_algorithms()
+
+    def test_assina_e_verifica_de_verdade(self):
+        """Round-trip com chave real: e o que o JWT do GitHub App faz."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        chave = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        privada = chave.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        publica = chave.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormatSubjectPublicKeyInfo
+            if hasattr(serialization, "PublicFormatSubjectPublicKeyInfo")
+            else serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
+        token = jwt.encode({"iss": "123456"}, privada, algorithm="RS256")
+        assert jwt.decode(token, publica, algorithms=["RS256"])["iss"] == "123456"

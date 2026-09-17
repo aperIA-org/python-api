@@ -114,8 +114,17 @@ def list_scans(
     repo = SQLAlchemyScanJobRepository(db)
     items = repo.list_by_user(user_id, limit=limit, offset=offset)
     total = repo.count_by_user(user_id)
+    # UMA query agregada para a pagina inteira, nao um count por card: sao ate'
+    # 200 execucoes aqui. O numero e' o mesmo que `GET /scans/{id}` devolve em
+    # `findings_summary.total`, porque as duas contam findings do COMMIT.
+    contagens = SQLAlchemyFindingRepository(db).count_by_commits(
+        [j.commit_sha for j in items], user_id=user_id
+    )
     return ScanJobPage(
-        items=[ScanJobSummary.from_entity(j) for j in items],
+        items=[
+            ScanJobSummary.from_entity(j, findings_total=contagens.get(j.commit_sha, 0))
+            for j in items
+        ],
         total=total,
         limit=limit,
         offset=offset,

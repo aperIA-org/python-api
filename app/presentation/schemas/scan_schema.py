@@ -75,7 +75,14 @@ class ScanJobResponse(BaseModel):
 
 
 class ScanJobSummary(BaseModel):
-    """Versao enxuta de `ScanJobResponse` (sem resumo de findings), usada em listagens."""
+    """Versao enxuta de `ScanJobResponse`, usada em listagens.
+
+    Nao carrega o `findings_summary` inteiro (por severidade e por tier) — isso e'
+    do detalhe —, mas carrega o TOTAL: e' o numero que a lista de scans mostra por
+    execucao, e ele tem de ser o mesmo que o detalhe do relatorio mostra, senao as
+    duas telas do mesmo fluxo se contradizem. Vem de uma query agregada por
+    commit, nao de um count por card.
+    """
 
     # Identidade da EXECUÇÃO. O mesmo commit pode ter várias (rescan da mesma
     # branch), então `commit_sha` deixou de identificar um scan sozinho.
@@ -97,9 +104,12 @@ class ScanJobSummary(BaseModel):
     final_risk_score: int | None
     final_risk_level: str | None
     created_at: datetime
+    # `None` = nao contamos, e' diferente de zero. A tela some com o numero em
+    # vez de afirmar "nenhum finding".
+    findings_total: int | None = None
 
     @classmethod
-    def from_entity(cls, job) -> "ScanJobSummary":
+    def from_entity(cls, job, findings_total: int | None = None) -> "ScanJobSummary":
         """Constroi o resumo a partir da entidade `ScanJob`, convertendo enums em valores."""
         return cls(
             id=job.id,
@@ -120,6 +130,7 @@ class ScanJobSummary(BaseModel):
             final_risk_score=job.final_risk_score,
             final_risk_level=job.final_risk_level,
             created_at=job.created_at,
+            findings_total=findings_total,
         )
 
 
@@ -337,6 +348,34 @@ class ScanIaPath(BaseModel):
     caldera_validated: bool
 
 
+class ScanIaChainStep(BaseModel):
+    """Um passo de uma cadeia de ataque.
+
+    `outcome` e' o campo que mais importa e o mais facil de achatar: as quatro
+    opcoes dizem coisas DIFERENTES. `emulado` = o Caldera executou o movimento e
+    ele funcionou; `bloqueado` = executou e um controle conteve — uma DEFESA que
+    funcionou, nao uma falha de dado; `nao_emulado` = o Caldera nao teve como
+    tentar (sem alvo, sem agente); `projecao` = ninguem executou, e' inferencia
+    do modelo. O `caldera_validated` booleano de `attack_path` confundia os tres
+    ultimos num unico `false`.
+    """
+
+    phase: str | None
+    tactic: str | None
+    technique: str | None
+    asset: str | None
+    outcome: str | None
+    evidence: str | None
+
+
+class ScanIaChain(BaseModel):
+    """Uma cadeia de ataque de ponta a ponta, com os passos em ordem."""
+
+    title: str | None
+    severity: str | None
+    steps: list[ScanIaChainStep]
+
+
 class ScanIaCti(BaseModel):
     """Threat intel (KEV + EPSS + OpenCTI) que alimentou a analise.
 
@@ -368,6 +407,76 @@ class ScanIaCaldera(BaseModel):
     ttps: list[str]
 
 
+class ScanIaVerdict(BaseModel):
+    """Leitura executiva do Tier 3: o que decidir sobre este commit.
+
+    `recommendation` e' um enum curto de proposito. A tela colore e prioriza por
+    ele, e ter que descobrir em prosa se o veredito era "bloquear" seria fragil —
+    a `headline` e' a frase para o humano, nao o dado que a UI interpreta.
+    """
+
+    recommendation: str | None
+    headline: str | None
+
+
+class ScanIaEffort(BaseModel):
+    """Esforco de correcao, estimado pelo Tier 3 a partir dos proprios findings.
+
+    Nao e' estimativa de sprint: sai de quantos arquivos e componentes os
+    findings tocam, que e' o que o modelo de fato viu.
+    """
+
+    level: str | None
+    label: str | None
+
+
+class ScanIaDeadline(BaseModel):
+    """Prazo recomendado, em dias corridos contados da analise.
+
+    Guardamos o numero E o texto: `days` serve para ordenar e comparar, `label`
+    e' o que a tela mostra sem ter que reformatar (e errar) o plural.
+    """
+
+    days: int | None
+    label: str | None
+
+
+class ScanIaImpactArea(BaseModel):
+    """Um efeito de negocio dos findings deste commit.
+
+    `area` e `severity` sao enums curtos porque a tela colore e ordena por eles;
+    `title`/`detail` sao o texto para o humano. Area desconhecida NAO e' descartada
+    — chega crua para a UI, que mostra o id em vez de sumir com o efeito.
+    """
+
+    area: str | None
+    severity: str | None
+    title: str | None
+    detail: str | None
+
+
+class ScanIaImpactNote(BaseModel):
+    """Um par titulo/detalhe da faixa de consequencias ("se corrigir agora"...)."""
+
+    headline: str | None
+    detail: str | None
+
+
+class ScanIaBusinessImpact(BaseModel):
+    """A traducao do risco tecnico para quem decide.
+
+    E' o bloco que responde "o que isso significa para a empresa" sem CVE, sem TTP
+    e sem nome de ferramenta. Vem do `analysis_json` do Tier 3; relatorio anterior
+    a esta versao do prompt sai `None`, e `None` e' "ninguem traduziu".
+    """
+
+    headline: str | None
+    areas: list[ScanIaImpactArea]
+    if_fixed_now: ScanIaImpactNote | None
+    if_deferred: ScanIaImpactNote | None
+    regulatory: ScanIaImpactNote | None
+
+
 class ScanIaSummary(BaseModel):
     """Resumo COMPACTO da camada de I.A do Tier 3, derivado do `analysis_json`.
 
@@ -383,8 +492,19 @@ class ScanIaSummary(BaseModel):
     risk_level: str | None
     risk_score: int | None
     paths: list[ScanIaPath]
+    # As cadeias agrupadas, que sao o que a tela desenha. `paths` (lista plana)
+    # continua para os relatorios anteriores a esta versao do prompt: sem
+    # `attack_chains`, a tela cai nela e monta uma cadeia sem titulo.
+    chains: list[ScanIaChain]
     cti: ScanIaCti | None
     caldera: ScanIaCaldera | None
+    # Os tres abaixo sao a leitura executiva, e chegaram DEPOIS: relatorio
+    # gerado antes dessa versao do prompt nao tem as chaves, e sai `None`.
+    # `None` e' "ninguem calculou" — a tela diz isso, nao um valor de fachada.
+    verdict: ScanIaVerdict | None
+    effort: ScanIaEffort | None
+    deadline: ScanIaDeadline | None
+    impact: ScanIaBusinessImpact | None
 
     @classmethod
     def from_analysis(cls, analysis_json: object) -> "ScanIaSummary":
@@ -403,8 +523,13 @@ class ScanIaSummary(BaseModel):
             risk_level=_str_ou_none(risco.get("level")),
             risk_score=_int_ou_none(risco.get("score")),
             paths=cls._paths(analysis.get("attack_path")),
+            chains=cls._chains(analysis.get("attack_chains")),
             cti=cls._cti(analysis),
             caldera=cls._caldera(analysis),
+            verdict=cls._verdict(analysis),
+            effort=cls._effort(analysis),
+            deadline=cls._deadline(analysis),
+            impact=cls._impact(analysis),
         )
 
     @staticmethod
@@ -428,6 +553,46 @@ class ScanIaSummary(BaseModel):
                 )
             )
         return passos
+
+    @staticmethod
+    def _chains(valor: object) -> list[ScanIaChain]:
+        """Normaliza `attack_chains`, descartando o que nao e' cadeia utilizavel.
+
+        Cadeia sem passo nenhum nao e' cadeia — sai da lista. Passo sem fase E sem
+        tecnica tambem: seria uma linha vazia no trilho.
+        """
+        cadeias: list[ScanIaChain] = []
+        for item in _lista_ou_vazia(valor):
+            if not isinstance(item, dict):
+                continue
+            passos: list[ScanIaChainStep] = []
+            for passo in _lista_ou_vazia(item.get("steps")):
+                if not isinstance(passo, dict):
+                    continue
+                fase = _str_ou_none(passo.get("phase"))
+                tecnica = _str_ou_none(passo.get("technique"))
+                if fase is None and tecnica is None:
+                    continue
+                passos.append(
+                    ScanIaChainStep(
+                        phase=fase,
+                        tactic=_str_ou_none(passo.get("tactic")),
+                        technique=tecnica,
+                        asset=_str_ou_none(passo.get("asset")),
+                        outcome=_str_ou_none(passo.get("outcome")),
+                        evidence=_str_ou_none(passo.get("evidence")),
+                    )
+                )
+            if not passos:
+                continue
+            cadeias.append(
+                ScanIaChain(
+                    title=_str_ou_none(item.get("title")),
+                    severity=_str_ou_none(item.get("severity")),
+                    steps=passos,
+                )
+            )
+        return cadeias
 
     @staticmethod
     def _cti(analysis: dict) -> ScanIaCti | None:
@@ -468,6 +633,94 @@ class ScanIaSummary(BaseModel):
             partial=_bool_ou_falso(dados.get("validacao_parcial")),
             ttps=_lista_de_str(dados.get("ttps_used")),
         )
+
+    @staticmethod
+    def _verdict(analysis: dict) -> "ScanIaVerdict | None":
+        """`None` quando o blob nao tem veredito — o caso de todo relatorio
+        gerado antes de o prompt pedir a chave, e do caminho degradado."""
+        dados = _dict_ou_vazio(analysis.get("executive_verdict"))
+        recomendacao = _str_ou_none(dados.get("recommendation"))
+        headline = _str_ou_none(dados.get("headline"))
+        if recomendacao is None and headline is None:
+            return None
+        return ScanIaVerdict(recommendation=recomendacao, headline=headline)
+
+    @staticmethod
+    def _effort(analysis: dict) -> "ScanIaEffort | None":
+        """Mesma regra do veredito: bloco vazio e' ausencia, nao zero."""
+        dados = _dict_ou_vazio(analysis.get("remediation_effort"))
+        nivel = _str_ou_none(dados.get("level"))
+        label = _str_ou_none(dados.get("label"))
+        if nivel is None and label is None:
+            return None
+        return ScanIaEffort(level=nivel, label=label)
+
+    @staticmethod
+    def _nota(valor: object) -> "ScanIaImpactNote | None":
+        """Par titulo/detalhe; `None` quando os dois vem vazios."""
+        dados = _dict_ou_vazio(valor)
+        headline = _str_ou_none(dados.get("headline"))
+        detail = _str_ou_none(dados.get("detail"))
+        if headline is None and detail is None:
+            return None
+        return ScanIaImpactNote(headline=headline, detail=detail)
+
+    @classmethod
+    def _impact(cls, analysis: dict) -> "ScanIaBusinessImpact | None":
+        """`None` quando o blob nao traz traducao de negocio nenhuma.
+
+        Um bloco com so' a frase, ou so' as areas, e' legitimo: a tela mostra o
+        que existe. O que nao pode e' um bloco vazio passando por traducao.
+        """
+        dados = _dict_ou_vazio(analysis.get("business_impact"))
+        if not dados:
+            return None
+
+        areas: list[ScanIaImpactArea] = []
+        for item in _lista_ou_vazia(dados.get("areas")):
+            if not isinstance(item, dict):
+                continue
+            area = ScanIaImpactArea(
+                area=_str_ou_none(item.get("area")),
+                severity=_str_ou_none(item.get("severity")),
+                title=_str_ou_none(item.get("title")),
+                detail=_str_ou_none(item.get("detail")),
+            )
+            # Item sem texto nenhum nao e' um efeito, e' ruido do modelo.
+            if area.title or area.detail:
+                areas.append(area)
+
+        headline = _str_ou_none(dados.get("headline"))
+        if_fixed = cls._nota(dados.get("if_fixed_now"))
+        if_deferred = cls._nota(dados.get("if_deferred"))
+        regulatory = cls._nota(dados.get("regulatory"))
+
+        if (
+            headline is None
+            and not areas
+            and if_fixed is None
+            and if_deferred is None
+            and regulatory is None
+        ):
+            return None
+
+        return ScanIaBusinessImpact(
+            headline=headline,
+            areas=areas,
+            if_fixed_now=if_fixed,
+            if_deferred=if_deferred,
+            regulatory=regulatory,
+        )
+
+    @staticmethod
+    def _deadline(analysis: dict) -> "ScanIaDeadline | None":
+        """`days` sozinho ja' basta para o bloco existir: o `label` e' derivavel."""
+        dados = _dict_ou_vazio(analysis.get("recommended_deadline"))
+        dias = _int_ou_none(dados.get("days"))
+        label = _str_ou_none(dados.get("label"))
+        if dias is None and label is None:
+            return None
+        return ScanIaDeadline(days=dias, label=label)
 
 
 class ScanToolsResponse(BaseModel):

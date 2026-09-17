@@ -19,11 +19,41 @@ IAC_EXTENSIONS = {".tf", ".tfvars", ".yaml", ".yml", ".json"}
 IAC_FILENAMES = {"Dockerfile", "docker-compose.yml", "docker-compose.yaml"}
 
 
+def _e_iac(caminho: str) -> bool:
+    return Path(caminho).suffix in IAC_EXTENSIONS or Path(caminho).name in IAC_FILENAMES
+
+
 def has_iac_files(changed_files: list[str]) -> bool:
-    return any(
-        Path(f).suffix in IAC_EXTENSIONS or Path(f).name in IAC_FILENAMES
-        for f in changed_files
-    )
+    return any(_e_iac(f) for f in changed_files)
+
+
+def arvore_tem_iac(repo_path: str) -> bool:
+    """Procura IaC na arvore inteira, para quando nao existe diff.
+
+    `has_iac_files` decide pelo DIFF, e num scan manual de branch
+    (`base_sha == commit_sha`) o diff e vazio — entao a condicao era sempre falsa
+    e o Prowler nunca rodava, mesmo num repositorio cheio de Terraform, manifesto
+    de Kubernetes e Dockerfile. Foi o caso medido no repo-alvo de demonstracao:
+    `infra/terraform/main.tf`, `infra/k8s/deployment.yaml` e `Dockerfile`
+    presentes, Prowler `skipped`.
+
+    E o mesmo defeito que o `changed_files` vazio ja tinha causado no Semgrep, e
+    a saida e a mesma que foi adotada la: sem diff contra o que comparar, o alvo
+    passa a ser a arvore inteira. Errar para o lado de varrer demais custa tempo;
+    errar para o lado de nao varrer custa a razao de existir do produto.
+
+    `.git` fica de fora porque a arvore materializada o inclui, e um `.yaml`
+    solto no diretorio de objetos nao e infraestrutura de ninguem.
+    """
+    raiz = Path(repo_path)
+    for caminho in raiz.rglob("*"):
+        if not caminho.is_file():
+            continue
+        if ".git" in caminho.relative_to(raiz).parts:
+            continue
+        if _e_iac(caminho.name):
+            return True
+    return False
 
 
 class ProwlerScanner(BaseScanner):

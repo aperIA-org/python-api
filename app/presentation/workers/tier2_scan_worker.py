@@ -40,6 +40,7 @@ from app.infrastructure.persistence import scan_tool_run_writer
 from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.scanners.prowler_scanner import (
     ProwlerScanner,
+    arvore_tem_iac,
     has_iac_files,
 )
 from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner
@@ -130,7 +131,10 @@ def run_tier2_scan(
         )
 
         prowler_findings: list[Finding] = []
-        if has_iac_files(arquivos):
+        # Sem diff (scan manual de branch) a pergunta muda: "o diff toca IaC?"
+        # nao tem resposta, entao vale "a arvore tem IaC?". Ver `arvore_tem_iac`.
+        tem_iac = has_iac_files(arquivos) if arquivos else arvore_tem_iac(repo_path)
+        if tem_iac:
             prowler_findings = ProwlerScanner().run_safe(
                 tool_id="prowler",
                 tier=2,

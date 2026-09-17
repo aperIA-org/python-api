@@ -383,6 +383,22 @@ def com_ferramentas(session_factory, seeded):
     return seeded
 
 
+def test_lista_traz_contagem_de_findings_igual_ao_detalhe(client, auth_headers, seeded):
+    """A lista mostra `findings_total`, e ele bate com o detalhe da execucao.
+
+    As duas telas do mesmo fluxo (Scans -> relatorio) mostram esse numero; se
+    divergissem, o usuario veria uma contagem mudar ao clicar em "ver relatorio".
+    Vem de uma query agregada, nao de um count por card.
+    """
+    lista = client.get("/scans", headers=auth_headers).json()
+    item = next(i for i in lista["items"] if i["id"] == str(seeded))
+    detalhe = client.get(f"/scans/{seeded}", headers=auth_headers).json()
+
+    assert item["findings_total"] == detalhe["findings_summary"]["total"]
+    # E o resumo por severidade continua sendo so' do detalhe.
+    assert "findings_summary" not in item
+
+
 def test_tools_lista_por_ferramenta(client, auth_headers, com_ferramentas):
     r = client.get(f"/scans/{com_ferramentas}/tools", headers=auth_headers)
     assert r.status_code == 200
@@ -621,6 +637,178 @@ def test_tools_ia_degradada(client, auth_headers, relatorio_tier3):
     # Emulação ausente sai `None`, não um bloco zerado — "não rodou" não pode
     # parecer "rodou e falhou".
     assert ia["caldera"] is None
+    # A leitura executiva não existe no blob degradado — e `None` é a resposta
+    # certa: a tela mostra "não calculado", não um veredito de fachada.
+    assert ia["verdict"] is None
+    assert ia["effort"] is None
+    assert ia["deadline"] is None
+    assert ia["impact"] is None
+
+
+def test_tools_ia_resume_a_leitura_executiva(client, auth_headers, relatorio_tier3):
+    """Veredito, esforço e prazo, quando o Tier 3 os emitiu.
+
+    São o que alimenta os tiles da tela de relatório. `recommendation` é um enum
+    curto de propósito: a UI colore por ele em vez de parsear a `headline`.
+    """
+    scan_id = relatorio_tier3(
+        {
+            **ANALISE_TIER3,
+            "executive_verdict": {
+                "recommendation": "bloquear",
+                "headline": "Token do Github valido exposto e alcancavel pela API interna.",
+            },
+            "remediation_effort": {"level": "baixo", "label": "2 arquivos, revogacao de token"},
+            "recommended_deadline": {"days": 1, "label": "24 horas"},
+        }
+    )
+    r = client.get(f"/scans/{scan_id}/tools", headers=auth_headers)
+    assert r.status_code == 200
+    ia = r.json()["ia"]
+
+    assert ia["verdict"]["recommendation"] == "bloquear"
+    assert ia["verdict"]["headline"].startswith("Token do Github")
+    assert ia["effort"] == {"level": "baixo", "label": "2 arquivos, revogacao de token"}
+    assert ia["deadline"] == {"days": 1, "label": "24 horas"}
+
+
+def test_tools_ia_resume_as_cadeias_de_ataque(client, auth_headers, relatorio_tier3):
+    """As cadeias agrupadas, que sao o que a tela desenha.
+
+    O `outcome` por passo e' o ponto: `bloqueado` e' uma DEFESA que funcionou e
+    nao pode virar o mesmo `false` de "nao emulado" nem de "projecao da IA".
+    """
+    scan_id = relatorio_tier3(
+        {
+            **ANALISE_TIER3,
+            "attack_chains": [
+                {
+                    "title": "Credenciais expostas → secrets store",
+                    "severity": "alto",
+                    "steps": [
+                        {"phase": "initial_access", "tactic": "TA0001", "technique": "T1190",
+                         "asset": "/upload sem auth", "outcome": "emulado",
+                         "evidence": "Payload de teste retornou 200 OK"},
+                        {"phase": "exfiltration", "tactic": "TA0010", "technique": "T1567",
+                         "asset": "secrets store", "outcome": "bloqueado",
+                         "evidence": "Barrado por politica IAM"},
+                        # Sem fase e sem tecnica: seria uma linha vazia no trilho.
+                        {"asset": "ruido", "outcome": "projecao"},
+                    ],
+                },
+                # Cadeia sem passo nenhum nao e' cadeia.
+                {"title": "vazia", "severity": "baixo", "steps": []},
+            ],
+        }
+    )
+    ia = client.get(f"/scans/{scan_id}/tools", headers=auth_headers).json()["ia"]
+
+    assert len(ia["chains"]) == 1
+    cadeia = ia["chains"][0]
+    assert cadeia["title"] == "Credenciais expostas → secrets store"
+    assert cadeia["severity"] == "alto"
+    assert len(cadeia["steps"]) == 2
+    assert cadeia["steps"][0]["outcome"] == "emulado"
+    assert cadeia["steps"][0]["tactic"] == "TA0001"
+    assert cadeia["steps"][0]["asset"] == "/upload sem auth"
+    assert cadeia["steps"][1]["outcome"] == "bloqueado"
+    # `attack_path` (lista plana) segue vindo: e' o fallback dos relatorios
+    # anteriores a esta versao do prompt.
+    assert len(ia["paths"]) == 2
+
+
+def test_tools_ia_sem_cadeias_ainda_traz_a_lista_plana(client, auth_headers, relatorio_tier3):
+    """Relatorio antigo: `chains` vazio e `paths` inteiro.
+
+    A tela cai na lista plana e monta uma cadeia sem titulo — mostrar menos, nao
+    nada.
+    """
+    scan_id = relatorio_tier3(ANALISE_TIER3)
+    ia = client.get(f"/scans/{scan_id}/tools", headers=auth_headers).json()["ia"]
+    assert ia["chains"] == []
+    assert len(ia["paths"]) == 2
+
+
+def test_tools_ia_resume_o_impacto_ao_negocio(client, auth_headers, relatorio_tier3):
+    """A traducao do risco tecnico para quem decide.
+
+    E' o bloco que a tela de relatorio abre: uma frase sem jargao, os efeitos por
+    area e a faixa de consequencias. `area`/`severity` sao enums porque a UI
+    colore por eles.
+    """
+    scan_id = relatorio_tier3(
+        {
+            **ANALISE_TIER3,
+            "business_impact": {
+                "headline": "Credenciais versionadas dao a terceiros o mesmo acesso da equipe.",
+                "areas": [
+                    {"area": "dados", "severity": "critico",
+                     "title": "Acesso indevido a sistemas e dados de clientes",
+                     "detail": "Quem obtiver as credenciais entra com o mesmo nivel da equipe."},
+                    {"area": "entrega", "severity": "medio",
+                     "title": "Risco de parar o pipeline de entregas",
+                     "detail": "A vulnerabilidade pode travar builds."},
+                    # Item sem texto nenhum e' ruido do modelo e nao vira efeito.
+                    {"area": "financeiro", "severity": "alto"},
+                ],
+                "if_fixed_now": {"headline": "~1 dia · 1 pessoa", "detail": "sem impacto em releases"},
+                "if_deferred": {"headline": "janela de 48h", "detail": "credenciais seguem ativas"},
+                "regulatory": {"headline": "LGPD · notificacao 72h", "detail": "em caso de vazamento"},
+            },
+        }
+    )
+    ia = client.get(f"/scans/{scan_id}/tools", headers=auth_headers).json()["ia"]
+    impacto = ia["impact"]
+
+    assert impacto["headline"].startswith("Credenciais versionadas")
+    assert len(impacto["areas"]) == 2
+    assert impacto["areas"][0]["area"] == "dados"
+    assert impacto["areas"][0]["severity"] == "critico"
+    assert impacto["if_fixed_now"] == {
+        "headline": "~1 dia · 1 pessoa",
+        "detail": "sem impacto em releases",
+    }
+    assert impacto["if_deferred"]["headline"] == "janela de 48h"
+    assert impacto["regulatory"]["headline"] == "LGPD · notificacao 72h"
+
+
+def test_tools_ia_impacto_parcial_nao_e_bloco_vazio(client, auth_headers, relatorio_tier3):
+    """So' a frase, sem areas nem faixa: a tela mostra o que existe.
+
+    O contrario tambem vale — bloco em que TUDO veio vazio sai `None`, para nao
+    haver um card de "impacto ao negocio" sem impacto nenhum dentro.
+    """
+    so_frase = relatorio_tier3(
+        {**ANALISE_TIER3, "business_impact": {"headline": "Uma frase e nada mais."}}
+    )
+    impacto = client.get(f"/scans/{so_frase}/tools", headers=auth_headers).json()["ia"]["impact"]
+    assert impacto["headline"] == "Uma frase e nada mais."
+    assert impacto["areas"] == []
+    assert impacto["if_fixed_now"] is None
+    assert impacto["regulatory"] is None
+
+    vazio = relatorio_tier3(
+        {**ANALISE_TIER3, "business_impact": {"headline": "", "areas": [], "regulatory": None}}
+    )
+    assert client.get(f"/scans/{vazio}/tools", headers=auth_headers).json()["ia"]["impact"] is None
+
+
+def test_tools_ia_leitura_executiva_ausente_em_relatorio_antigo(
+    client, auth_headers, relatorio_tier3
+):
+    """Relatório gerado antes do prompt pedir as chaves: os três saem `None`.
+
+    É o teste de retrocompatibilidade — o blob antigo continua respondendo 200 e
+    a ausência é informação, não erro.
+    """
+    scan_id = relatorio_tier3(ANALISE_TIER3)
+    ia = client.get(f"/scans/{scan_id}/tools", headers=auth_headers).json()["ia"]
+    assert ia["verdict"] is None
+    assert ia["effort"] is None
+    assert ia["deadline"] is None
+    assert ia["impact"] is None
+    # O resto do resumo segue inteiro: a ausência é só dos campos novos.
+    assert ia["risk_score"] == 92
 
 
 def test_tools_ia_ausente_sem_relatorio_tier3(client, auth_headers, com_ferramentas):

@@ -74,6 +74,29 @@ class CircuitOpenError(ClaudeClientError):
     """O circuit breaker está aberto — chamada não tentada."""
 
 
+class ResponseTruncatedError(ClaudeClientError):
+    """A resposta bateu no teto de ``max_tokens`` e veio cortada.
+
+    Existe separada porque o sintoma engana. Uma resposta truncada quase sempre
+    para no meio de uma string, então ``json.loads`` reclama de JSON inválido —
+    e o log passa a dizer "o modelo devolveu JSON malformado" quando o fato é
+    "a resposta não caberia no teto". Foi exatamente essa confusão que custou
+    uma investigação: o Tier 2 acusava ``Unterminated string`` e a causa era o
+    ``max_tokens`` de 4096 com 102 findings no prompt.
+
+    Distinguir também muda a ação: JSON malformado é problema de prompt, e
+    truncagem é problema de orçamento — sobe o teto ou reduz a entrada.
+    """
+
+    def __init__(self, output_tokens: int, max_tokens: int) -> None:
+        super().__init__(
+            f"Resposta truncada em max_tokens ({output_tokens}/{max_tokens}). "
+            "O JSON veio incompleto — suba o teto ou reduza a entrada."
+        )
+        self.output_tokens = output_tokens
+        self.max_tokens = max_tokens
+
+
 class GuardBlockedError(ClaudeClientError):
     """LLM Guard bloqueou o conteúdo (provável prompt injection)."""
 
@@ -91,10 +114,10 @@ class ClaudeResponse:
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
-
-    @property
-    def stop_reason(self) -> str | None:  # placeholder para futura instrumentação
-        return None
+    # `"max_tokens"` aqui significa resposta cortada. Era uma property que
+    # devolvia `None` fixo, e por isso ninguém no código conseguia distinguir
+    # "o modelo terminou" de "o modelo foi interrompido no meio".
+    stop_reason: str | None = None
 
 
 class ClaudeClient:
@@ -203,6 +226,19 @@ class ClaudeClient:
             commit_sha=commit_sha,
         )
 
+        stop_reason = getattr(message, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            # Aviso e não exceção: `call` devolve texto, e texto cortado ainda
+            # pode ser útil para quem só vai exibir. Quem precisa de JSON é o
+            # `call_json`, e é lá que isto vira erro.
+            logger.warning(
+                "claude_resposta_truncada",
+                model=model,
+                commit_sha=commit_sha,
+                output_tokens=output_tokens,
+                max_tokens=max_tokens,
+            )
+
         return ClaudeResponse(
             text=text,
             model=model,
@@ -210,6 +246,7 @@ class ClaudeClient:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
+            stop_reason=stop_reason,
         )
 
     def call_json(
@@ -233,6 +270,11 @@ class ClaudeClient:
             max_tokens=max_tokens,
             commit_sha=commit_sha,
         )
+        # Antes de tentar parsear: uma resposta truncada é JSON incompleto por
+        # construção, e o `JSONDecodeError` que sairia daqui descreveria o
+        # sintoma ("Unterminated string") em vez da causa.
+        if response.stop_reason == "max_tokens":
+            raise ResponseTruncatedError(response.output_tokens, max_tokens)
         return self._parse_json(response.text)
 
     @staticmethod
@@ -270,6 +312,7 @@ class ClaudeClient:
 __all__ = [
     "ClaudeClient",
     "ClaudeClientError",
+    "ResponseTruncatedError",
     "ClaudeResponse",
     "CircuitOpenError",
     "GuardBlockedError",

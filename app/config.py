@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     CLAUDE_MODEL_REASONING: str = "claude-sonnet-4-6"
     CLAUDE_MODEL_FORMATTING: str = "claude-haiku-4-5-20251001"
     CLAUDE_PROMPT_CACHE_ENABLED: bool = True
+    # Teto de saída das chamadas de RACIOCÍNIO (chain_of_events, attack_path).
+    # 4096 era o default do SDK e não cabia: os dois prompts devolvem JSON com
+    # uma entrada por passo da cadeia, e um scan de 102 findings truncava a
+    # resposta no meio de uma string — o Tier 2 e o Tier 3 caíam em modo
+    # degradado juntos. O relatório em markdown continua no default, porque ali
+    # o teto de 40 findings do prompt já limita o tamanho da saída.
+    CLAUDE_MAX_TOKENS_REASONING: int = 16384
 
     # ---- DAST (ZAP) ----
     ZAP_BASE_URL: str = "http://zap:8090"

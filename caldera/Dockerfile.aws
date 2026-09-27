@@ -1,0 +1,11 @@
+# Caldera para o Fargate. Duas diferenças em relação ao compose:
+#
+# 1. O `tmpfs` que cria /usr/src/app/plugins/magma/dist/assets não existe no
+#    Fargate, e sem esse diretório o rest_api.py quebra no boot (ele registra a
+#    rota estática da UI magma incondicionalmente, e a imagem publicada não traz
+#    os assets compilados). Aqui o diretório vazio entra na imagem.
+# 2. O local.yml entra por COPY em vez de bind mount, com chaves próprias —
+#    as do repo são de desenvolvimento e estão versionadas.
+FROM ghcr.io/mitre/caldera:5.0.0
+RUN mkdir -p /usr/src/app/plugins/magma/dist/assets
+COPY local.aws.yml /usr/src/app/conf/local.yml

@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # dele. Nenhum ajuste de `-Xmx` conserta isso: a memória não é do heap, nem
     # do processo Java.
     ZAP_ASCAN_DISABLED_RULES: str = "40026"
+    # ZAP sob demanda no ECS Fargate (deploy AWS). Vazio = usa ZAP_BASE_URL
+    # (compose local). Ver app/infrastructure/scanners/zap_fargate.py.
+    ZAP_FARGATE_CLUSTER: str = ""
+    ZAP_FARGATE_TASK_DEF: str = "aperia-zap"
+    ZAP_FARGATE_SUBNETS: str = ""  # separadas por vírgula
+    ZAP_FARGATE_SECURITY_GROUP: str = ""
+    AWS_REGION: str = "us-east-1"
 
     # ---- Threat Intel ----
     # Fontes leves, sem infra (o OpenCTI exigia ElasticSearch/RabbitMQ/MinIO —
@@ -127,6 +134,15 @@ class Settings(BaseSettings):
     CALDERA_SANDBOX_MODE: bool = True
     CALDERA_POLL_INTERVAL: int = 10  # testes injetam 0 via construtor
     CALDERA_AGENT_GROUP: str = "red"
+    # Caldera sob demanda no ECS Fargate (deploy AWS). Vazio = usa CALDERA_URL
+    # (compose local). Ver app/infrastructure/scanners/caldera_fargate.py.
+    CALDERA_FARGATE_CLUSTER: str = ""
+    CALDERA_FARGATE_TASK_DEF: str = "aperia-caldera"
+    CALDERA_FARGATE_VPC: str = ""
+    # Subnet SEM rota para a internet — é o isolamento do sandbox.
+    CALDERA_FARGATE_SUBNET: str = ""
+    CALDERA_FARGATE_SECURITY_GROUP: str = ""
+    CALDERA_FARGATE_VPCE_SECURITY_GROUP: str = ""
 
     # ---- AI Security ----
     LLM_GUARD_ENABLED: bool = True

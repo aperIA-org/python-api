@@ -85,6 +85,7 @@ class CalderaClient:
     def __init__(
         self,
         *,
+        base_url: str | None = None,
         poll_interval: int | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
@@ -102,7 +103,8 @@ class CalderaClient:
             else settings.CALDERA_POLL_INTERVAL
         )
         self.client = http_client or httpx.Client(
-            base_url=settings.CALDERA_URL,
+            # No deploy AWS a URL é a da task Fargate daquele scan, não a fixa.
+            base_url=base_url or settings.CALDERA_URL,
             headers={"KEY": settings.CALDERA_API_KEY},
             timeout=30.0,
         )

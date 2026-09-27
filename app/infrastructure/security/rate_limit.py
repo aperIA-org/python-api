@@ -33,16 +33,29 @@ def _redis() -> redis.Redis:
 
 
 def ip_do_cliente(request: Request) -> str:
-    """IP real do cliente, considerando o proxy.
-
-    Atrás do Caddy, ``request.client.host`` é o IP do container do proxy — o
-    mesmo para todo mundo, o que faria um único contador para o mundo inteiro.
+    """IP real do cliente, atravessando os dois saltos que existem na frente.
 
     Cada proxy **acrescenta** ao ``X-Forwarded-For`` o IP de quem conectou
     nele, então o último item foi escrito pelo proxy imediato e é o único
     confiável: os anteriores vieram do cliente e podem ser forjados para
-    escapar do limite.
+    escapar do limite. Sem isso, atrás do Caddy todo mundo cairia no IP do
+    container do proxy — um contador só para o mundo inteiro.
+
+    O front é o caso difícil: ele renderiza no servidor, então chama a API a
+    partir do Amplify e o IP que chega aqui é o do Amplify, não o do usuário.
+    Contar por ele agruparia todos os visitantes num contador só, e bastaria
+    um atacante estourar o limite para trancar o login de todos — a proteção
+    viraria o ataque. Por isso o front reenvia o IP do usuário, e ele só é
+    aceito acompanhado do segredo combinado entre os dois: como esta API é
+    pública, um cabeçalho sem prova seria só um jeito cômodo de forjar
+    identidade e furar o limite.
     """
+    segredo = settings.INTERNAL_PROXY_TOKEN
+    if segredo and request.headers.get("x-aperia-proxy-token") == segredo:
+        repassado = request.headers.get("x-aperia-client-ip")
+        if repassado:
+            return repassado.strip()
+
     encaminhado = request.headers.get("x-forwarded-for")
     if encaminhado:
         return encaminhado.split(",")[-1].strip()

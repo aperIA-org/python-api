@@ -91,3 +91,35 @@ def test_redis_fora_do_ar_libera_a_requisicao(monkeypatch):
         rate_limit, "_redis", lambda: _RedisFake(erro=redis_lib.ConnectionError("fora"))
     )
     rate_limit.limitar(_RequestFake(), escopo="login", maximo=1, janela_s=60)
+
+
+class TestIpReenviadoPeloFront:
+    """O front renderiza no servidor: sem isto, todo visitante vira um IP só."""
+
+    def test_aceita_o_ip_do_usuario_quando_o_segredo_confere(self, monkeypatch):
+        monkeypatch.setattr(rate_limit.settings, "INTERNAL_PROXY_TOKEN", "segredo")
+        req = _RequestFake(headers={
+            "x-aperia-proxy-token": "segredo",
+            "x-aperia-client-ip": "198.51.100.7",
+            "x-forwarded-for": "172.18.0.5",
+        })
+        assert rate_limit.ip_do_cliente(req) == "198.51.100.7"
+
+    def test_ignora_o_cabecalho_sem_o_segredo(self, monkeypatch):
+        # A API é pública: aceitar o IP sem prova seria entregar um jeito
+        # cômodo de trocar de identidade a cada request e furar o limite.
+        monkeypatch.setattr(rate_limit.settings, "INTERNAL_PROXY_TOKEN", "segredo")
+        req = _RequestFake(headers={
+            "x-aperia-proxy-token": "errado",
+            "x-aperia-client-ip": "198.51.100.7",
+            "x-forwarded-for": "203.0.113.9",
+        })
+        assert rate_limit.ip_do_cliente(req) == "203.0.113.9"
+
+    def test_sem_segredo_configurado_ignora_o_cabecalho(self, monkeypatch):
+        monkeypatch.setattr(rate_limit.settings, "INTERNAL_PROXY_TOKEN", "")
+        req = _RequestFake(headers={
+            "x-aperia-client-ip": "198.51.100.7",
+            "x-forwarded-for": "203.0.113.9",
+        })
+        assert rate_limit.ip_do_cliente(req) == "203.0.113.9"

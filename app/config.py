@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     CALDERA_SANDBOX_MODE: bool = True
     CALDERA_POLL_INTERVAL: int = 10  # testes injetam 0 via construtor
     CALDERA_AGENT_GROUP: str = "red"
+
+    # Segredo compartilhado com o front. Só com ele a API aceita o IP do
+    # usuário reenviado pelo Next — ver rate_limit.ip_do_cliente.
+    INTERNAL_PROXY_TOKEN: str = ""
     # Caldera sob demanda no ECS Fargate (deploy AWS). Vazio = usa CALDERA_URL
     # (compose local). Ver app/infrastructure/scanners/caldera_fargate.py.
     CALDERA_FARGATE_CLUSTER: str = ""

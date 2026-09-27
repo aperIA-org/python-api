@@ -141,6 +141,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.aws
 .envrc
 .venv
 env/
@@ -215,3 +216,4 @@ app/secrets/*
 # Chave privada do GitHub App (montada em /app/secrets nos containers).
 secrets/*
 !secrets/README.md
+caldera/local.aws.yml

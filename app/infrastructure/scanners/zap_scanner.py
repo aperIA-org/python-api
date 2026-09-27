@@ -46,6 +46,7 @@ from app.core.exceptions import AperiaError, ScannerUnavailableError
 from app.domain.finding.entities import Finding
 from app.domain.finding.value_objects import Severity
 from app.infrastructure.scanners.base_scanner import BaseScanner
+from app.infrastructure.scanners.zap_fargate import zap_sob_demanda
 
 logger = structlog.get_logger()
 
@@ -186,16 +187,20 @@ class ZAPScanner(BaseScanner):
         repo_url: str,
     ) -> list[Finding]:
         inicio = time.monotonic()
-        self._handshake(commit_sha)
-        self._aplicar_tetos(commit_sha)
-        self._spider(target_url, commit_sha)
-        self._active_scan(target_url, commit_sha)
-        return self._collect_alerts(
-            target_url,
-            commit_sha,
-            repo_url,
-            duracao_s=int(time.monotonic() - inicio),
-        )
+        # Na AWS o ZAP é uma task Fargate por scan; falha ao subir cai no
+        # run_safe como qualquer outro erro do scanner.
+        with zap_sob_demanda(self.zap_url) as zap_url:
+            self.zap_url = zap_url
+            self._handshake(commit_sha)
+            self._aplicar_tetos(commit_sha)
+            self._spider(target_url, commit_sha)
+            self._active_scan(target_url, commit_sha)
+            return self._collect_alerts(
+                target_url,
+                commit_sha,
+                repo_url,
+                duracao_s=int(time.monotonic() - inicio),
+            )
 
     # ----- request helper -----
 

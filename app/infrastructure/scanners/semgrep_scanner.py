@@ -43,10 +43,28 @@ def _erros_de_config(raw: dict) -> list[str]:
     """
     tipos_de_config = {"InvalidRuleSchemaError", "SemgrepError"}
     return [
-        str(e.get("long_msg") or e.get("message") or e.get("type"))
+        str(e.get("long_msg") or e.get("message") or _nome_do_tipo(e.get("type")))
         for e in raw.get("errors", []) or []
-        if isinstance(e, dict) and e.get("type") in tipos_de_config
+        if isinstance(e, dict) and _nome_do_tipo(e.get("type")) in tipos_de_config
     ]
+
+
+def _nome_do_tipo(bruto: object) -> str:
+    """Nome do construtor em ``errors[].type``.
+
+    O Semgrep serializa variante de OCaml de duas formas: sem argumento vira
+    string (``"SemgrepError"``), com argumento vira lista
+    (``["PartialParsing", [{...}]]``). Testar a lista contra um ``set``
+    levantava ``TypeError: unhashable type: 'list'`` **antes** de qualquer
+    filtro, e o ``run_safe`` transformava isso em zero findings — ou seja,
+    bastava um arquivo que não parseia (sintaxe quebrada, linguagem não
+    suportada) para o Semgrep inteiro sumir do relatório como se o
+    repositório estivesse limpo. Exatamente o que o filtro por tipo existe
+    para evitar.
+    """
+    if isinstance(bruto, (list, tuple)):
+        bruto = bruto[0] if bruto else None
+    return str(bruto) if bruto is not None else ""
 
 
 
@@ -215,7 +233,11 @@ class SemgrepScanner(BaseScanner):
         }
         extra = r.get("extra", {})
         metadata = extra.get("metadata", {})
+        # Mesma variação do `cwe` logo abaixo: o Semgrep entrega esses
+        # metadados ora como escalar, ora como lista.
         cve_raw = metadata.get("cve")
+        if isinstance(cve_raw, (list, tuple)):
+            cve_raw = cve_raw[0] if cve_raw else None
         return Finding(
             source="semgrep",
             severity=severity_map.get(extra.get("severity", "INFO"), Severity.INFO),

@@ -28,6 +28,7 @@ from typing import Any
 
 import structlog
 
+from app.config import settings
 from app.core.celery_app import celery_app
 from app.core.exceptions import SandboxViolationError
 from app.domain.finding.entities import Finding
@@ -36,6 +37,7 @@ from app.infrastructure.persistence import scan_tool_run_writer
 from app.presentation.workers.persistence_guard import persistir_ou_falhar
 from app.infrastructure.intelligence.mitre_caldera_client import CalderaClient
 from app.infrastructure.intelligence.threat_intel_client import ThreatIntelClient
+from app.infrastructure.scanners.caldera_fargate import caldera_sob_demanda
 from app.infrastructure.scanners.zap_scanner import ZAPScanner
 
 logger = structlog.get_logger()
@@ -118,6 +120,22 @@ def _merge_cti(cti_results: list[dict | None]) -> dict[str, Any]:
     return merged
 
 
+def _caldera_indisponivel(reason: str) -> dict[str, Any]:
+    """Mesmo formato do `_failed_result` do cliente: o relatório não muda de forma."""
+    return {
+        "status": "failed",
+        "reason": reason,
+        "success_rate": 0.0,
+        "techniques_executed": 0,
+        "techniques_successful": 0,
+        "ttps_used": [],
+        "caldera_validated": False,
+        "validacao_parcial": False,
+        "tecnicas_por_pai": [],
+        "tecnicas_sem_cobertura": [],
+    }
+
+
 @celery_app.task(
     name="app.presentation.workers.tier3_scan_worker.run_tier3_scan",
     bind=True,
@@ -192,11 +210,14 @@ def run_tier3_scan(
         for ttp in cti_merged.get("mitre_techniques", []) or []:
             if ttp and ttp not in techniques:
                 techniques.append(ttp)
-        caldera = CalderaClient()
-        caldera_results = caldera.run_safe(
-            adversary_name=adversary_name or f"pr-{commit_sha[:8]}",
-            mitre_techniques=techniques,
-        )
+        # Na AWS o Caldera é uma task Fargate por scan, numa subnet sem saída;
+        # falha ao subir cai no `except` abaixo como qualquer indisponibilidade.
+        with caldera_sob_demanda(settings.CALDERA_URL) as caldera_url:
+            caldera = CalderaClient(base_url=caldera_url)
+            caldera_results = caldera.run_safe(
+                adversary_name=adversary_name or f"pr-{commit_sha[:8]}",
+                mitre_techniques=techniques,
+            )
     except SandboxViolationError as exc:
         # Em produção, isso é um erro de configuração que deve falhar
         # o deploy. Aqui no MVP isolamos e seguimos em modo degradado.
@@ -205,18 +226,18 @@ def run_tier3_scan(
             commit_sha=commit_sha,
             error=str(exc),
         )
-        caldera_results = {
-            "status": "failed",
-            "reason": "SandboxViolationError",
-            "success_rate": 0.0,
-            "techniques_executed": 0,
-            "techniques_successful": 0,
-            "ttps_used": [],
-            "caldera_validated": False,
-            "validacao_parcial": False,
-            "tecnicas_por_pai": [],
-            "tecnicas_sem_cobertura": [],
-        }
+        caldera_results = _caldera_indisponivel("SandboxViolationError")
+    except Exception as exc:  # noqa: BLE001 — subir a infra do Caldera é fora do run_safe
+        # `run_safe` isola o que acontece DEPOIS do Caldera estar de pé; subir a
+        # task Fargate acontece antes dele. Sem este ramo, um ECS fora do ar
+        # derrubaria o Tier 3 inteiro em vez de degradar como o resto do pipeline.
+        logger.warning(
+            "tier3_caldera_indisponivel",
+            commit_sha=commit_sha,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        caldera_results = _caldera_indisponivel(type(exc).__name__)
 
     # Threat intel e Caldera não passam por `run_safe` (um é um cliente HTTP em
     # laço por CVE, o outro devolve um dict com `status` próprio), então o

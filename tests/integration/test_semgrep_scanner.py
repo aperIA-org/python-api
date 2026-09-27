@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.domain.finding.value_objects import Severity
-from app.infrastructure.scanners.semgrep_scanner import SemgrepScanner, SemgrepConfigError
+from app.infrastructure.scanners.semgrep_scanner import (
+    SemgrepScanner,
+    SemgrepConfigError,
+    _erros_de_config,
+)
 
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
@@ -349,3 +353,24 @@ class TestErroDeConfigNaoViraZero:
             )
         assert run_mock.call_count == 1
         assert findings
+
+
+class TestTipoDeErroVariante:
+    """`errors[].type` vem como string OU como lista — ver `_nome_do_tipo`."""
+
+    def test_partial_parsing_como_lista_nao_quebra(self):
+        # Formato real: um arquivo que não parseia no repositório varrido.
+        raw = {
+            "results": [],
+            "errors": [{"type": ["PartialParsing", [{"path": "b.py"}]]}],
+        }
+        # Antes: TypeError: unhashable type: 'list'.
+        assert _erros_de_config(raw) == []
+
+    def test_erro_de_config_como_lista_ainda_e_detectado(self):
+        raw = {"errors": [{"type": ["SemgrepError", {}], "message": "regra ruim"}]}
+        assert _erros_de_config(raw) == ["regra ruim"]
+
+    def test_erro_de_config_como_string_continua_valendo(self):
+        raw = {"errors": [{"type": "InvalidRuleSchemaError", "long_msg": "schema"}]}
+        assert _erros_de_config(raw) == ["schema"]

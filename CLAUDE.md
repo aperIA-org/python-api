@@ -73,3 +73,8 @@ Git: branch principal `main`. Execução detalhada em `GUIA_EXECUCAO.md` e `READ
 - ZAP (DAST) roda quando o repositório tem `target_url` cadastrada (a URL da aplicação
   publicada). Sem ela o Tier 3 registra `reason="no_target_url"` e faz só a análise de
   código. A validação recusa alvos internos — um scan DAST dispara requisições ativas.
+- Tier 3 no deploy AWS: ZAP e Caldera sobem como task ECS Fargate por scan e caem no
+  fim (`app/infrastructure/scanners/{zap,caldera}_fargate.py`, ligados pelas
+  `*_FARGATE_*`). O Caldera roda numa subnet sem rota para a internet e sem task
+  role — é a tradução do `internal: true` do compose, e o agente só é considerado
+  pronto quando registra no grupo.

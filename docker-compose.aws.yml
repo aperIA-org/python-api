@@ -1,0 +1,90 @@
+# aperIA — deploy enxuto para EC2 t3.micro (POC, free tier)
+#
+# Diferenças em relação ao docker-compose.base.yml:
+# - banco fica no RDS (DB_* no .env), não sobe Postgres local;
+# - um único worker consome todas as filas com -c 1; o tier3 aqui só orquestra:
+#   ZAP e Caldera sobem como task Fargate por scan e são derrubados no fim
+#   (app/infrastructure/scanners/{zap,caldera}_fargate.py). O Caldera roda numa
+#   subnet sem rota para a internet — o isolamento do sandbox do compose;
+# - imagem vem pronta do GHCR, build numa VM de 1 GB trava;
+# - Caddy termina HTTPS (exigido pelo webhook do GitHub).
+#
+# Uso na EC2:
+#   API_DOMAIN=<ip-com-hifens>.sslip.io docker compose -f docker-compose.aws.yml up -d
+#   docker compose -f docker-compose.aws.yml run --rm api alembic upgrade head
+
+x-app: &app
+  image: ${APERIA_IMAGE:-ghcr.io/aperia-org/python-api:latest}
+  env_file:
+    - .env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/0
+  volumes:
+    # Chave privada do GitHub App — ver comentário no docker-compose.base.yml.
+    - ./secrets:/app/secrets:ro
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  networks:
+    - aperia_net
+
+services:
+  api:
+    <<: *app
+    mem_limit: 350m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *app
+    # max-tasks-per-child recicla o processo e devolve a memória dos scans.
+    # tier3 aqui só orquestra: ZAP e Caldera são tasks Fargate (*_FARGATE_* no .env).
+    # ponytail: -c 1 faz um scan Tier 3 (~15 min) segurar os tier1/2 de outros PRs;
+    # separar um worker tier3 se isso atrapalhar.
+    command: celery -A app.core.celery_app worker -Q tier1,tier2,analysis,reporting,tier3 -c 1 --max-tasks-per-child=20 --loglevel=info
+
+  redis:
+    image: redis:7-alpine
+    # AOF pelo mesmo motivo do docker-compose.base.yml (jobs órfãos).
+    command: redis-server --appendonly yes
+    volumes:
+      - aperia_redis_data:/data
+    restart: unless-stopped
+    networks:
+      - aperia_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?defina API_DOMAIN, ex. 1-2-3-4.sslip.io}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - aperia_caddy_data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - aperia_net
+
+networks:
+  aperia_net:
+    driver: bridge
+
+volumes:
+  aperia_redis_data:
+  # Certificados do Let's Encrypt — perder isso estoura o rate limit.
+  aperia_caddy_data:

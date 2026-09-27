@@ -32,3 +32,5 @@ pytest==8.3.4
 pytest-cov==6.0.0
 pytest-asyncio==1.3.0
 respx==0.23.1
+# ZAP sob demanda no ECS Fargate (app/infrastructure/scanners/zap_fargate.py).
+boto3==1.43.103

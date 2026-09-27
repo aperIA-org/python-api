@@ -39,12 +39,12 @@ if config.config_file_name is not None:
 
 
 def _resolve_database_url() -> str:
-    env_url = (
-        os.getenv("ALEMBIC_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or config.get_main_option("sqlalchemy.url")
-        or ""
-    )
+    env_url = os.getenv("ALEMBIC_DATABASE_URL") or os.getenv("DATABASE_URL")
+    if not env_url and os.getenv("DB_HOST"):
+        # Só DB_* definidos (ex.: RDS): usa a mesma URL que o app monta,
+        # senão cairia no SQLite do alembic.ini.
+        from app.infrastructure.database.sqlalchemy import DATABASE_URL as env_url
+    env_url = env_url or config.get_main_option("sqlalchemy.url") or ""
     if env_url.startswith("postgresql+asyncpg://"):
         env_url = env_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
     elif env_url.startswith("postgresql://"):
@@ -54,7 +54,8 @@ def _resolve_database_url() -> str:
     return env_url
 
 
-config.set_main_option("sqlalchemy.url", _resolve_database_url())
+# configparser trata % como interpolação; senha com quote_plus tem %XX.
+config.set_main_option("sqlalchemy.url", _resolve_database_url().replace("%", "%%"))
 
 target_metadata = Base.metadata
 

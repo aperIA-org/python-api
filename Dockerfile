@@ -5,6 +5,11 @@
 # e exigem regression tests.
 FROM python:3.11-slim-bookworm AS aperia-base
 
+# Vincula o pacote no GHCR a este repositório. Sem isso o pacote nasce solto,
+# e o GITHUB_TOKEN do workflow — que só alcança pacotes do próprio repo — leva
+# `denied: permission_denied` ao publicar, mesmo com `packages: write`.
+LABEL org.opencontainers.image.source="https://github.com/aperIA-org/python-api"
+
 ARG TRUFFLEHOG_VERSION=3.63.7
 # 1.62.0 (fev/2024) parou de conseguir ler o registro de regras: o registro
 # passou a servir regras com severidade `MEDIUM`, e aquela versao so aceita

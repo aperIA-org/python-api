@@ -21,6 +21,7 @@ from app.infrastructure.repositories.sqlalchemy_refresh_token_repository import 
 )
 from app.infrastructure.repositories.sqlalchemy_user_repository import SQLAlchemyUserRepository
 from app.infrastructure.security.argon2_password_service import Argon2PasswordService
+from app.infrastructure.security.rate_limit import limite_por_ip
 from app.presentation.schemas.auth_schema import LoginRequest, RefreshRequest, TokenResponse
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ _AUTH_ERROR_RESPONSES = {
     summary="Login",
     response_description="Autenticação bem-sucedida.",
     responses=_AUTH_ERROR_RESPONSES,
+    # Forca bruta de senha e o risco real aqui: sem teto, a unica barreira e o
+    # tamanho da senha. 10 a cada 15 min cobre quem erra a senha de verdade.
+    dependencies=[Depends(limite_por_ip(escopo="login", maximo=10, janela_s=900))],
 )
 async def login(
     body: LoginRequest,

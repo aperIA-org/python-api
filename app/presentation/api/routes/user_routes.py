@@ -10,6 +10,7 @@ from app.application.exceptions import UserValidationError
 from app.application.use_cases.create_user_use_case import CreateUserUseCase
 from app.application.use_cases.get_user_use_case import GetUserUseCase
 from app.infrastructure.database.sqlalchemy import get_db
+from app.infrastructure.security.rate_limit import limite_por_ip
 from app.infrastructure.repositories.sqlalchemy_user_repository import SQLAlchemyUserRepository
 from app.presentation.schemas.user_schema import UserCreate, UserCreatedResponse, UserResponse
 
@@ -24,8 +25,13 @@ router = APIRouter(prefix="/users", tags=["users"])
     responses={
         400: {"description": "Erro de validação de domínio.", "content": {"application/json": {"example": {"detail": "E-mail invalido"}}}},
         409: {"description": "E-mail já cadastrado.", "content": {"application/json": {"example": {"detail": "E-mail já cadastrado"}}}},
+        429: {"description": "Muitas tentativas de cadastro a partir do mesmo IP."},
         500: {"description": "Erro interno (ex.: falha de permissão no banco).", "content": {"application/json": {"example": {"detail": "Internal server error"}}}},
     },
+    # Cadastro legitimo e raro; 5/h por IP nao atrapalha ninguem e tira da mesa
+    # tanto a criacao de contas em massa quanto a varredura de e-mails, que a
+    # resposta 409 deste endpoint permite distinguir.
+    dependencies=[Depends(limite_por_ip(escopo="signup", maximo=5, janela_s=3600))],
 )
 def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserCreatedResponse:
     """

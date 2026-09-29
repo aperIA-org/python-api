@@ -29,6 +29,10 @@ class ScanAlreadyInProgressError(Exception):
     """Ja existe um scan em andamento para o commit (rota mapeia para 409)."""
 
 
+class ScanNotCancellableError(Exception):
+    """Execucao ja' encerrada, ou sem id de canvas (rota mapeia para 409)."""
+
+
 class GithubAppNotConfiguredError(Exception):
     """Credenciais do GitHub App ausentes (rota mapeia para 503)."""
 

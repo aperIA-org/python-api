@@ -69,6 +69,9 @@ class ScanJobModel(Base):
     blocked_at_tier = Column(SmallInteger)
     final_risk_score = Column(Integer)
     final_risk_level = Column(String(20))
+    # Raiz do canvas Celery, para revogar o que ainda não rodou. Nullable:
+    # execuções anteriores a esta coluna não têm como ser canceladas.
+    celery_task_id = Column(String(155))
     # Multi-tenant: dono e repositório conectado (nullable p/ scans legados).
     user_id = Column(Uuid(as_uuid=True))
     repository_id = Column(Uuid(as_uuid=True))
@@ -95,6 +98,7 @@ class ScanJobModel(Base):
             blocked_at_tier=job.blocked_at_tier.value if job.blocked_at_tier else None,
             final_risk_score=job.final_risk_score,
             final_risk_level=job.final_risk_level,
+            celery_task_id=job.celery_task_id,
             user_id=job.user_id,
             repository_id=job.repository_id,
             created_at=job.created_at,
@@ -122,6 +126,7 @@ class ScanJobModel(Base):
             else None,
             final_risk_score=self.final_risk_score,
             final_risk_level=self.final_risk_level,
+            celery_task_id=self.celery_task_id,
             user_id=self.user_id,
             repository_id=self.repository_id,
             created_at=self.created_at,

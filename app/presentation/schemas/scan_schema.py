@@ -745,3 +745,15 @@ class ScanToolsResponse(BaseModel):
     # lista de Scans ja' faz essa chamada: um endpoint novo seria um segundo
     # round-trip por card.
     ia: ScanIaSummary | None = None
+
+
+class CancelScanResponse(BaseModel):
+    """Desfecho de `POST /scans/{id}/cancel`.
+
+    `tiers_cancelados` é quantas etapas estavam de fato em andamento — é o que
+    diferencia "parei o pipeline inteiro" de "parei só o que faltava".
+    """
+
+    status: str
+    scan_id: str
+    tiers_cancelados: int

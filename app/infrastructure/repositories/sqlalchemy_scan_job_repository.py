@@ -211,6 +211,53 @@ class SQLAlchemyScanJobRepository(ScanJobRepository):
         )
         self.db.flush()
 
+    def set_celery_task_id(self, commit_sha: str, task_id: str) -> None:
+        """Guarda a raiz do canvas da execução corrente daquele commit."""
+        self.db.execute(
+            update(ScanJobModel)
+            .where(ScanJobModel.id == _id_execucao_corrente(commit_sha))
+            .values(celery_task_id=task_id)
+        )
+        self.db.flush()
+
+    def cancel_pending_tiers(self, job_id: UUID) -> int:
+        """Encerra como ``cancelled`` todo tier ainda ``queued``/``running``.
+
+        Gêmeo de ``fail_pending_tiers``, com dois desvios deliberados: fecha em
+        ``cancelled`` (nada quebrou — alguém parou) e é endereçado por **id de
+        execução**, não por commit, porque quem cancela está olhando uma
+        execução concreta na tela.
+
+        Devolve quantos tiers foram de fato interrompidos: zero significa que a
+        execução já havia terminado, e aí a rota responde 409 em vez de fingir
+        que cancelou.
+        """
+        agora = datetime.utcnow()
+        values: dict = {}
+        for prefix in _TIER_PREFIXES:
+            coluna_status = getattr(ScanJobModel, f"{prefix}_status")
+            coluna_fim = getattr(ScanJobModel, f"{prefix}_completed_at")
+            pendente = coluna_status.in_(_VALORES_EM_ANDAMENTO)
+            values[f"{prefix}_status"] = case(
+                (pendente, TierStatus.CANCELLED.value), else_=coluna_status
+            )
+            values[f"{prefix}_completed_at"] = case((pendente, agora), else_=coluna_fim)
+
+        resultado = self.db.execute(
+            update(ScanJobModel)
+            .where(
+                ScanJobModel.id == job_id,
+                # Só conta como cancelamento se havia o que cancelar.
+                or_(*[
+                    getattr(ScanJobModel, f"{p}_status").in_(_VALORES_EM_ANDAMENTO)
+                    for p in _TIER_PREFIXES
+                ]),
+            )
+            .values(**values)
+        )
+        self.db.flush()
+        return resultado.rowcount or 0
+
     def list_recent(self, *, limit: int = 50, offset: int = 0) -> list[ScanJob]:
         result = self.db.execute(
             select(ScanJobModel)

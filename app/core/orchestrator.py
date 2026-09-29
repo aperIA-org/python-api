@@ -410,10 +410,16 @@ def start_pipeline(
             f"nao foi possivel enfileirar o pipeline do commit {commit_sha}: {exc}"
         ) from exc
 
+    # Depois do apply_async: é aqui que o id existe. Guardá-lo é o que torna o
+    # cancelamento possível — sem ele só daria para mexer no banco, e as tarefas
+    # já enfileiradas sobrescreveriam o estado logo em seguida.
+    scan_job_writer.set_celery_task_id(commit_sha, resultado.id)
+
     logger.info(
         "pipeline_dispatched",
         commit_sha=commit_sha,
         pr_number=pr_number,
         repo=repo_full_name,
+        task_id=resultado.id,
     )
     return resultado

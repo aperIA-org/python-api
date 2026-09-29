@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.domain.finding.entities import Finding
 from app.domain.scan.tool_catalog import TIER_TOOLS
+from app.application.exceptions import ScanNotCancellableError
+from app.application.use_cases.cancel_scan_use_case import CancelScanUseCase
 from app.infrastructure.database.sqlalchemy import get_db
 from app.infrastructure.repositories.sqlalchemy_finding_repository import (
     SQLAlchemyFindingRepository,
@@ -31,6 +34,7 @@ from app.infrastructure.repositories.sqlalchemy_scan_tool_run_repository import 
 )
 from app.presentation.api.dependencies.auth import get_current_user
 from app.presentation.schemas.scan_schema import (
+    CancelScanResponse,
     FindingsSummary,
     ScanIaSummary,
     ScanJobPage,
@@ -41,6 +45,8 @@ from app.presentation.schemas.scan_schema import (
     ScanToolRunResponse,
     ScanToolsResponse,
 )
+
+logger = structlog.get_logger()
 
 router = APIRouter(
     prefix="/scans",
@@ -306,4 +312,47 @@ def get_scan_history(
         total=len(execucoes),
         limit=len(execucoes),
         offset=0,
+    )
+
+
+@router.post(
+    "/{scan_id}/cancel",
+    response_model=CancelScanResponse,
+    summary="Cancelar uma execucao em andamento",
+    responses={
+        404: {"description": "Scan nao encontrado."},
+        409: {
+            "description": "Execucao ja' encerrada, ou disparada antes do cancelamento existir.",
+            "content": {"application/json": {"example": {"detail": "Esta execucao ja' terminou."}}},
+        },
+    },
+)
+def cancel_scan(
+    scan_id: str,
+    db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user),
+) -> CancelScanResponse:
+    """Interrompe o pipeline: revoga o canvas e fecha os tiers pendentes.
+
+    Os findings ja' gravados permanecem — o codigo foi analisado de verdade nas
+    etapas que concluiram. Cancelar interrompe o que falta, nao invalida o que
+    passou.
+    """
+    job = _owned_job_or_404(db, scan_id, user_id)
+    repo = SQLAlchemyScanJobRepository(db)
+    try:
+        tiers = CancelScanUseCase(repo).execute(job)
+        db.commit()
+    except ScanNotCancellableError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        logger.error("scan_cancel_falhou", scan_id=scan_id, error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="Nao foi possivel cancelar agora. Tente novamente."
+        ) from exc
+
+    return CancelScanResponse(
+        status="cancelled", scan_id=str(job.id), tiers_cancelados=tiers
     )

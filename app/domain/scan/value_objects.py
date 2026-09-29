@@ -14,6 +14,9 @@ class TierStatus(str, Enum):
     DONE = "done"
     FAILED = "failed"
     SKIPPED = "skipped"
+    # Interrompido por quem disparou. Terminal, e distinto de FAILED: nada
+    # quebrou — alguém decidiu parar, e o relatório precisa dizer isso.
+    CANCELLED = "cancelled"
 
 
 class ToolStatus(str, Enum):

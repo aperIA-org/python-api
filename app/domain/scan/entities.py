@@ -35,6 +35,9 @@ class ScanJob:
     final_risk_level: str | None = None
     # Multi-tenant: dono do scan (desnormalizado para filtro rápido) e
     # repositório conectado que o originou. Nullable p/ scans legados.
+    # Id da raiz do canvas Celery. Sem ele não há como revogar o que ainda
+    # não começou: o cancelamento só saberia mexer no banco.
+    celery_task_id: str | None = None
     user_id: UUID | None = None
     repository_id: UUID | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)

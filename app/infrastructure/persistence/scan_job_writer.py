@@ -209,3 +209,21 @@ def set_final_risk_from_analysis(commit_sha: str, analysis: dict[str, Any] | Non
         logger.warning(
             "scan_job_final_risk_update_failed", commit_sha=commit_sha, error=str(exc)
         )
+
+
+def set_celery_task_id(commit_sha: str, task_id: str) -> None:
+    """Guarda a raiz do canvas logo após o dispatch. Best-effort.
+
+    Falhar aqui não pode derrubar um pipeline que já está andando — só custa a
+    possibilidade de cancelar aquela execução, e a rota diz isso com 409.
+    """
+    if not settings.SCAN_PERSISTENCE_ENABLED or not commit_sha or not task_id:
+        return
+    try:
+        with SessionLocal() as db:
+            SQLAlchemyScanJobRepository(db).set_celery_task_id(commit_sha, task_id)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "scan_job_task_id_nao_gravado", commit_sha=commit_sha, error=str(exc)
+        )

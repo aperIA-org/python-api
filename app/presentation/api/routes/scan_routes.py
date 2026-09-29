@@ -341,7 +341,7 @@ def cancel_scan(
     job = _owned_job_or_404(db, scan_id, user_id)
     repo = SQLAlchemyScanJobRepository(db)
     try:
-        tiers = CancelScanUseCase(repo).execute(job)
+        tiers = CancelScanUseCase(repo, SQLAlchemyScanToolRunRepository(db)).execute(job)
         db.commit()
     except ScanNotCancellableError as exc:
         db.rollback()

@@ -25,8 +25,9 @@ logger = structlog.get_logger()
 
 
 class CancelScanUseCase:
-    def __init__(self, scan_repo) -> None:
+    def __init__(self, scan_repo, tool_run_repo=None) -> None:
         self._scan_repo = scan_repo
+        self._tool_run_repo = tool_run_repo
 
     def execute(self, job: ScanJob) -> int:
         """Revoga o canvas e fecha os tiers pendentes. Devolve quantos fechou."""
@@ -48,6 +49,12 @@ class CancelScanUseCase:
         # emulação seguiria rodando até o teto de uma hora do próprio
         # container — e quem cancelou não tem por que pagar essa espera.
         parar_tarefas_do_scan(job.commit_sha)
+
+        # As ferramentas em voo precisam fechar junto: a faixa do tier diria
+        # "cancelado" e, ao expandi-la, a ferramenta dentro continuaria "em
+        # execução".
+        if self._tool_run_repo is not None:
+            self._tool_run_repo.cancel_pending(job.id)
 
         tiers = self._scan_repo.cancel_pending_tiers(job.id)
         if tiers == 0:

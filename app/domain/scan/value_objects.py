@@ -35,6 +35,9 @@ class ToolStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     DEGRADED = "degraded"
+    # Espelha TierStatus.CANCELLED: a ferramenta que estava rodando quando
+    # alguem parou o scan. Sem isso ela ficaria "running" para sempre.
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.domain.scan.tool_run_entities import ScanToolRun
+from app.domain.scan.value_objects import ToolStatus
 from app.domain.scan.tool_run_repository import ScanToolRunRepository
 from app.infrastructure.persistence.models.scan_tool_run_model import ScanToolRunModel
 
@@ -78,6 +80,27 @@ class SQLAlchemyScanToolRunRepository(ScanToolRunRepository):
                 )
                 .values(**{c: row[c] for c in _SET_COLUMNS})
             )
+
+    def cancel_pending(self, scan_job_id: UUID) -> int:
+        """Fecha como ``cancelled`` as ferramentas ainda em voo desta execução.
+
+        Sem isto a ferramenta que estava rodando fica ``running`` para sempre:
+        a faixa do tier diz "cancelado", e ao expandi-la a ferramenta lá dentro
+        continua "em execução" — a mesma contradição um nível abaixo.
+        """
+        agora = datetime.utcnow()
+        resultado = self.db.execute(
+            update(ScanToolRunModel)
+            .where(
+                ScanToolRunModel.scan_job_id == scan_job_id,
+                ScanToolRunModel.status.in_(
+                    [ToolStatus.QUEUED.value, ToolStatus.RUNNING.value]
+                ),
+            )
+            .values(status=ToolStatus.CANCELLED.value, completed_at=agora)
+        )
+        self.db.flush()
+        return resultado.rowcount or 0
 
     def list_by_scan_job(self, scan_job_id: UUID) -> list[ScanToolRun]:
         result = self.db.execute(

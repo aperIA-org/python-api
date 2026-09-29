@@ -102,3 +102,16 @@ def test_encerra_as_tarefas_fargate_depois_de_revogar(monkeypatch, revoke):
 
     # Ordem: revogar a fila, derrubar o que já está de pé, só então escrever.
     assert [nome for nome, _ in revoke] == ["revogar", "fargate", "banco"]
+
+
+def test_fecha_tambem_as_ferramentas_em_voo(monkeypatch, revoke):
+    """Tier "cancelado" com ferramenta "em execução" dentro é contraditório."""
+    monkeypatch.setattr(modulo, "parar_tarefas_do_scan", lambda commit_sha: 0)
+    repo = MagicMock()
+    repo.cancel_pending_tiers.return_value = 1
+    tool_repo = MagicMock()
+
+    job = make_job()
+    CancelScanUseCase(repo, tool_repo).execute(job)
+
+    tool_repo.cancel_pending.assert_called_once_with(job.id)

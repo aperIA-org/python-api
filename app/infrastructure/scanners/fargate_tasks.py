@@ -64,3 +64,44 @@ def parar_tarefas_do_scan(commit_sha: str) -> int:
             "fargate_parada_falhou", commit_sha=commit_sha, error=str(exc)
         )
         return 0
+
+
+def parar_tarefas_orfas(marcadores_ativos: set[str]) -> list[str]:
+    """Encerra tarefas cujo scan não existe mais. Devolve os marcadores parados.
+
+    O caso que motivou isto: um deploy recria o container do worker, e a tarefa
+    Celery que estava no Tier 3 morre sem rodar o ``finally`` que derruba o
+    Fargate. A tarefa fica de pé consumindo até o teto de uma hora do próprio
+    container — e, pior, parece que o cancelamento não funcionou.
+
+    Conservador de propósito: só para o que tem marcador **e** cujo scan já não
+    está em andamento. Tarefa sem marcador é de antes desta versão e fica para
+    o teto; derrubá-la às cegas arriscaria matar o scan de outra pessoa.
+    """
+    cluster = settings.ZAP_FARGATE_CLUSTER or settings.CALDERA_FARGATE_CLUSTER
+    if not cluster:
+        return []
+
+    paradas: list[str] = []
+    try:
+        import boto3
+
+        ecs = boto3.client("ecs", region_name=settings.AWS_REGION)
+        arns = ecs.list_tasks(cluster=cluster, desiredStatus="RUNNING").get("taskArns", [])
+        if not arns:
+            return []
+
+        for tarefa in ecs.describe_tasks(cluster=cluster, tasks=arns).get("tasks", []):
+            marcador = tarefa.get("startedBy") or ""
+            if not marcador.startswith(_PREFIXO) or marcador in marcadores_ativos:
+                continue
+            ecs.stop_task(
+                cluster=cluster,
+                task=tarefa["taskArn"],
+                reason="scan encerrado; tarefa orfa",
+            )
+            paradas.append(marcador)
+    except Exception as exc:  # noqa: BLE001 — best-effort, nunca impede o boot
+        logger.warning("fargate_varredura_orfas_falhou", error=str(exc))
+
+    return paradas

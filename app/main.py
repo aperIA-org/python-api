@@ -7,6 +7,10 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.infrastructure.scanners.fargate_tasks import (
+    marcador_do_scan,
+    parar_tarefas_orfas,
+)
 from app.application.use_cases.recover_stale_scans_use_case import (
     RecoverStaleScanJobsUseCase,
 )
@@ -126,6 +130,34 @@ def recover_stale_scan_jobs() -> None:
             liberados=len(liberados),
             commits=liberados,
         )
+
+
+@app.on_event("startup")
+def stop_orphan_fargate_tasks() -> None:
+    """Encerra, no boot, tarefas Fargate cujo scan já não existe.
+
+    Mesma razão da varredura acima, um andar abaixo: um deploy recria o
+    container do worker e a tarefa Celery do Tier 3 morre sem rodar o
+    ``finally`` que derruba o teste dinâmico e a emulação. Elas ficam de pé
+    consumindo até o teto de uma hora do próprio container — e quem tentou
+    cancelar vê a tarefa viva e conclui que o cancelamento falhou.
+
+    Roda depois de ``recover_stale_scan_jobs`` de propósito: é aquela varredura
+    que encerra os scans presos, e é a lista de scans **ainda** em andamento que
+    diz quais tarefas têm dono.
+    """
+    if not settings.SCAN_PERSISTENCE_ENABLED:
+        return
+    try:
+        with SessionLocal() as db:
+            ativos = SQLAlchemyScanJobRepository(db).list_in_progress()
+        marcadores = {marcador_do_scan(job.commit_sha) for job in ativos}
+        paradas = parar_tarefas_orfas(marcadores)
+    except Exception as exc:  # noqa: BLE001 — best-effort: nunca impede o boot
+        log.warning("fargate_orphan_sweep_failed", error=str(exc))
+        return
+    if paradas:
+        log.warning("fargate_orphan_tasks_stopped", total=len(paradas), marcadores=paradas)
 
 app.include_router(health_router)
 app.include_router(user_router)

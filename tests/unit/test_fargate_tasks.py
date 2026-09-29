@@ -66,3 +66,46 @@ def test_ecs_fora_do_ar_nao_derruba_o_cancelamento(monkeypatch):
 
     _com_ecs(monkeypatch, _Quebrado())
     assert parar_tarefas_do_scan("abc123") == 0
+
+
+class _EcsComTarefas:
+    def __init__(self, tarefas):
+        self._tarefas = tarefas
+        self.paradas = []
+
+    def list_tasks(self, **kw):
+        return {"taskArns": [t["taskArn"] for t in self._tarefas]}
+
+    def describe_tasks(self, **kw):
+        return {"tasks": self._tarefas}
+
+    def stop_task(self, **kw):
+        self.paradas.append(kw["task"])
+
+
+def test_varredura_poupa_tarefa_de_scan_ainda_ativo(monkeypatch):
+    """Parar a tarefa de um scan vivo abortaria o scan de outra pessoa."""
+    viva = marcador_do_scan("aaaa111122223333")
+    morta = marcador_do_scan("bbbb444455556666")
+    ecs = _EcsComTarefas([
+        {"taskArn": "arn:viva", "startedBy": viva},
+        {"taskArn": "arn:morta", "startedBy": morta},
+    ])
+    _com_ecs(monkeypatch, ecs)
+
+    paradas = fargate_tasks.parar_tarefas_orfas({viva})
+
+    assert ecs.paradas == ["arn:morta"]
+    assert paradas == [morta]
+
+
+def test_varredura_ignora_tarefa_sem_marcador(monkeypatch):
+    """Sem marcador não dá para saber de quem é — derrubar às cegas é pior."""
+    ecs = _EcsComTarefas([
+        {"taskArn": "arn:antiga", "startedBy": None},
+        {"taskArn": "arn:outra", "startedBy": "algo-de-fora"},
+    ])
+    _com_ecs(monkeypatch, ecs)
+
+    assert fargate_tasks.parar_tarefas_orfas(set()) == []
+    assert ecs.paradas == []

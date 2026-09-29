@@ -87,7 +87,7 @@ def test_fargate_fora_do_ar_nao_derruba_o_tier3(monkeypatch):
     monkeypatch.setattr(
         tier3_scan_worker,
         "caldera_sob_demanda",
-        lambda url: (_ for _ in ()).throw(RuntimeError("ECS fora do ar")),
+        lambda url, commit_sha="": (_ for _ in ()).throw(RuntimeError("ECS fora do ar")),
     )
     monkeypatch.setattr(tier3_scan_worker, "ThreatIntelClient", lambda: None)
     monkeypatch.setattr(tier3_scan_worker, "persistir_ou_falhar", lambda *a, **k: None)

@@ -7,12 +7,6 @@ andar" sozinho, que é pior do que não ter botão.
 
 O que este caso de uso NÃO faz, de propósito:
 
-- **Não derruba a tarefa Fargate do Tier 3.** Se o teste dinâmico ou a emulação
-  estiverem de pé, o container ``timer`` da própria tarefa a encerra em até uma
-  hora. Ele existe exatamente para o caso de o worker sumir sem chamar o
-  encerramento, e cancelar é esse caso. Rastrear a tarefa para matá-la agora
-  economizaria alguns centavos e acrescentaria um vínculo novo entre o scan e o
-  ECS.
 - **Não apaga os findings já gravados.** O que as etapas concluídas
   encontraram continua valendo: o código foi analisado de verdade. Cancelar
   interrompe o que falta, não invalida o que passou.
@@ -25,6 +19,7 @@ import structlog
 
 from app.application.exceptions import ScanNotCancellableError
 from app.domain.scan.entities import ScanJob
+from app.infrastructure.scanners.fargate_tasks import parar_tarefas_do_scan
 
 logger = structlog.get_logger()
 
@@ -47,6 +42,12 @@ class CancelScanUseCase:
             )
 
         self._revogar(job.celery_task_id, job.commit_sha)
+
+        # Depois de revogar e antes de escrever: as tarefas do Tier 3 vivem
+        # fora do worker, então revogar a fila não as alcança. Sem isto, a
+        # emulação seguiria rodando até o teto de uma hora do próprio
+        # container — e quem cancelou não tem por que pagar essa espera.
+        parar_tarefas_do_scan(job.commit_sha)
 
         tiers = self._scan_repo.cancel_pending_tiers(job.id)
         if tiers == 0:

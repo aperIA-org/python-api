@@ -26,6 +26,7 @@ import httpx
 import structlog
 
 from app.config import settings
+from app.infrastructure.scanners.fargate_tasks import marcador_do_scan
 
 logger = structlog.get_logger()
 
@@ -36,7 +37,7 @@ _TAG_EFEMERO = [{"Key": "project", "Value": "aperia"}, {"Key": "efemero", "Value
 
 
 @contextmanager
-def caldera_sob_demanda(url_fixa: str) -> Iterator[str]:
+def caldera_sob_demanda(url_fixa: str, commit_sha: str = "") -> Iterator[str]:
     if not settings.CALDERA_FARGATE_CLUSTER:
         yield url_fixa
         return
@@ -56,6 +57,8 @@ def caldera_sob_demanda(url_fixa: str) -> Iterator[str]:
             cluster=cluster,
             taskDefinition=settings.CALDERA_FARGATE_TASK_DEF,
             launchType="FARGATE",
+            # Liga a tarefa ao commit: é por aqui que o cancelamento a encontra.
+            **({"startedBy": marcador_do_scan(commit_sha)} if commit_sha else {}),
             networkConfiguration={
                 "awsvpcConfiguration": {
                     "subnets": [subnet],

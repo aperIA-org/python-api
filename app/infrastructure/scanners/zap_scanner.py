@@ -189,7 +189,7 @@ class ZAPScanner(BaseScanner):
         inicio = time.monotonic()
         # Na AWS o ZAP é uma task Fargate por scan; falha ao subir cai no
         # run_safe como qualquer outro erro do scanner.
-        with zap_sob_demanda(self.zap_url) as zap_url:
+        with zap_sob_demanda(self.zap_url, commit_sha) as zap_url:
             self.zap_url = zap_url
             self._handshake(commit_sha)
             self._aplicar_tetos(commit_sha)

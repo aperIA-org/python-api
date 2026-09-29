@@ -212,7 +212,7 @@ def run_tier3_scan(
                 techniques.append(ttp)
         # Na AWS o Caldera é uma task Fargate por scan, numa subnet sem saída;
         # falha ao subir cai no `except` abaixo como qualquer indisponibilidade.
-        with caldera_sob_demanda(settings.CALDERA_URL) as caldera_url:
+        with caldera_sob_demanda(settings.CALDERA_URL, commit_sha) as caldera_url:
             caldera = CalderaClient(base_url=caldera_url)
             caldera_results = caldera.run_safe(
                 adversary_name=adversary_name or f"pr-{commit_sha[:8]}",

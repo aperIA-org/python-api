@@ -84,3 +84,21 @@ def test_falha_ao_revogar_nao_e_engolida(monkeypatch):
     with pytest.raises(RuntimeError, match="broker"):
         CancelScanUseCase(repo).execute(make_job())
     repo.cancel_pending_tiers.assert_not_called()
+
+
+def test_encerra_as_tarefas_fargate_depois_de_revogar(monkeypatch, revoke):
+    """A emulação roda fora do worker: revogar a fila não a alcança."""
+    monkeypatch.setattr(
+        modulo,
+        "parar_tarefas_do_scan",
+        lambda commit_sha: revoke.append(("fargate", commit_sha)),
+    )
+    repo = MagicMock()
+    repo.cancel_pending_tiers.side_effect = lambda job_id: (
+        revoke.append(("banco", job_id)) or 1
+    )
+
+    CancelScanUseCase(repo).execute(make_job())
+
+    # Ordem: revogar a fila, derrubar o que já está de pé, só então escrever.
+    assert [nome for nome, _ in revoke] == ["revogar", "fargate", "banco"]

@@ -16,6 +16,13 @@ porque é justamente o que o modelo costuma colapsar.
 
 Nada aqui é importado por nada. Ao terminar a verificação, feche o PR sem
 merge e apague a branch.
+
+Segunda rodada: a primeira expôs dois defeitos e os dois foram corrigidos.
+O reparo de recuo rebaseava o bloco pela primeira linha, e com um `def` na
+coluna 0 não corrigia nada — o corpo da função saiu com 1 espaço. Agora o
+recuo é aprendido par a par, e o resultado passa por `ast.parse` antes de
+sair. E findings fora do diff do PR deixaram de ser postados (levavam 422) —
+viram remediação só no dashboard.
 """
 from __future__ import annotations
 

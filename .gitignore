@@ -140,8 +140,10 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
-.env.aws
+# `.env*` em vez da lista explicita: `.env.production` e `.env.local` nao
+# estavam cobertos, e a lista so cresce quando alguem lembra de atualiza-la.
+.env*
+!.env.example
 .envrc
 .venv
 env/

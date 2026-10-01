@@ -295,16 +295,34 @@ class ClaudeClient:
 
     @staticmethod
     def _parse_json(text: str) -> dict:
+        """Extrai o objeto JSON da resposta, tolerando o que vier em volta.
+
+        Os prompts pedem JSON estrito e sem fences, e o modelo quase sempre
+        obedece — mas "quase" custa caro aqui: uma frase depois do objeto
+        derruba a remediação inteira daquele finding, e o erro que sobe é
+        ``Extra data: line 14 column 1``, que não diz nada a quem lê o log.
+
+        ``raw_decode`` é a ferramenta da stdlib para isto: lê o primeiro valor
+        JSON e devolve onde ele terminou, ignorando o resto. Resolve tanto o
+        texto solto no fim quanto a fence de fechamento.
+        """
         stripped = text.strip()
         if stripped.startswith("```"):
             # remove fence inicial ```json (ou ``` puro)
             stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
-            if stripped.endswith("```"):
-                stripped = stripped[: -3].rstrip()
+        # Pula qualquer prosa antes do objeto.
+        inicio = stripped.find("{")
+        if inicio > 0:
+            stripped = stripped[inicio:]
         try:
-            return json.loads(stripped)
+            valor, _fim = json.JSONDecoder().raw_decode(stripped)
         except json.JSONDecodeError as exc:
             raise ClaudeClientError(f"Resposta não é JSON válido: {exc}") from exc
+        if not isinstance(valor, dict):
+            raise ClaudeClientError(
+                f"Resposta JSON não é um objeto: {type(valor).__name__}"
+            )
+        return valor
 
 
 # Exporta as constantes de modelo para que callers não precisem importar

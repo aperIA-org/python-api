@@ -10,6 +10,14 @@ tinha. Com um só nível, aprender e escalar dão no mesmo; é a partir do segun
 que eles divergem, e é aí que um erro vira `IndentationError`.
 
 Nada aqui é importado por nada. Fechar o PR sem merge ao terminar.
+
+Segunda rodada. A primeira recusou as três correções de SQL dentro da classe
+com `expected an indented block`, e a causa estava no mapa de recuo: quando o
+modelo achata o trecho na coluna 0, o `def` (4 no arquivo) e o corpo (8) viram
+o mesmo nível, e o dicionário guardava só o último. Agora o conflito é
+detectado e recusado com motivo legível — e o prompt passou a proibir incluir
+a linha de assinatura, porque substituição de UMA linha passou em 100% dos
+casos e multilinha atravessando o `def` falhou em 100%.
 """
 from __future__ import annotations
 

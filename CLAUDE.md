@@ -64,7 +64,7 @@ curl -s http://localhost:8000/health   # {"status":"ok"}
 
 Testes: mockar scanner **no namespace do worker** (`patch.object(tier2_scan_worker, "TrivyScanner")`); HTTP via `respx`; DB via SQLite in-memory + `StaticPool`; tasks via `.delay().get()` em eager. Fixtures autouse em `tests/conftest.py`.
 
-Git: branch principal `main`. Execução detalhada em `GUIA_EXECUCAO.md` e `README.md`.
+Git: branch principal `main`. Arquitetura e execução local no `README.md`.
 
 ## Pendências conhecidas
 

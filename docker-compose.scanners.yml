@@ -35,7 +35,7 @@
 #   (nenhum perfil)       só a base — front, auth, pipeline T1/T2
 #   --profile dast        + ZAP e Juice Shop        → Tier 3 com DAST
 #   --profile emulation   + Caldera e o agente      → emulação MITRE ATT&CK
-#   --profile cti         + OpenCTI                 → ver docs/pendencias.md §3
+#   --profile cti         + OpenCTI                 → não sobe; ver o serviço abaixo
 
 services:
   zap:
@@ -111,9 +111,11 @@ services:
     image: opencti/platform:6.4.10
     container_name: aperia-opencti
     profiles: [cti]
-    # NÃO reiniciar: falta um search engine na stack (docs/pendencias.md §3),
-    # então ele nunca sobe. Com restart automático virava crash-loop
-    # queimando CPU continuamente — custo real, benefício zero.
+    # NÃO reiniciar: o OpenCTI exige um search engine (OpenSearch/Elastic) que
+    # esta stack não provê, então ele nunca sobe. Com restart automático
+    # virava crash-loop queimando CPU continuamente — custo real, benefício
+    # zero. A inteligência de ameaças do Tier 3 vem de CISA KEV + EPSS, que
+    # são HTTP puro e não precisam de infraestrutura.
     restart: "no"
     mem_limit: 2g
     environment:

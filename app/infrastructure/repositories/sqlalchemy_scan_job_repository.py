@@ -48,7 +48,7 @@ def _id_execucao_corrente(commit_sha: str):
     Ressalva conhecida: se um redisparo acontecer no intervalo entre o último
     tier encerrar e uma task atrasada da execução anterior escrever, a escrita
     atrasada cai na execução nova. Fechar isso exige levar o id da execução no
-    canvas (ver docs/pendencias.md).
+    canvas, em vez de resolver pelo commit a cada escrita.
     """
     return (
         select(ScanJobModel.id)

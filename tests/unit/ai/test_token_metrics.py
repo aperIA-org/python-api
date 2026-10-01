@@ -23,6 +23,20 @@ def _tokens(model: str, type_: str) -> float:
     ) or 0.0
 
 
+def _preco(model: str):
+    """A tabela de preços do próprio módulo.
+
+    Os valores esperados saem DAQUI, não de literais. O que está sob teste é a
+    conta de `record_token_usage` — separar entrada fresca de cache de leitura
+    e de escrita —, não quanto a Anthropic cobra. Com literais, trocar o modelo
+    de raciocínio quebrava quatro testes que nada tinham a ver com a mudança,
+    e aconteceu: na migração para o Opus 5.5.
+    """
+    preco = model_constants.pricing_for(model)
+    assert preco is not None, f"sem pricing para {model}"
+    return preco
+
+
 def _requests(model: str, outcome: str) -> float:
     return REGISTRY.get_sample_value(
         "claude_requests_total", {"model": model, "outcome": outcome}
@@ -44,7 +58,8 @@ class TestRecordTokenUsage:
     def test_fresh_input_pricing_for_reasoning(self):
         model = model_constants.REASONING
         before = _cost(model)
-        # 1M fresh input @ $3.0 + 500k output @ $15.0 = $3.0 + $7.5 = $10.50
+        p = _preco(model)
+        esperado = p.input + 0.5 * p.output  # 1M de entrada fresca + 500k de saída
         record_token_usage(
             model=model,
             input_tokens=1_000_000,
@@ -53,14 +68,15 @@ class TestRecordTokenUsage:
             output_tokens=500_000,
         )
         delta = _cost(model) - before
-        assert delta == pytest.approx(10.50, rel=1e-3)
+        assert delta == pytest.approx(esperado, rel=1e-3)
 
     def test_cache_read_pricing_for_reasoning(self):
         model = model_constants.REASONING
         before = _cost(model)
-        # input_tokens=1M includes 800k cache_read.
-        # fresh = 200k → $0.60; cache_read 800k @ $0.30 → $0.24
-        # output 0 → $0. Total: $0.84
+        # `input_tokens` é o TOTAL e já inclui os 800k de cache_read: a conta
+        # tem de cobrar 200k como entrada fresca, não 1M.
+        p = _preco(model)
+        esperado = 0.2 * p.input + 0.8 * p.cache_read
         record_token_usage(
             model=model,
             input_tokens=1_000_000,
@@ -69,12 +85,12 @@ class TestRecordTokenUsage:
             output_tokens=0,
         )
         delta = _cost(model) - before
-        assert delta == pytest.approx(0.84, rel=1e-3)
+        assert delta == pytest.approx(esperado, rel=1e-3)
 
     def test_cache_write_pricing_higher_than_input(self):
         model = model_constants.REASONING
         before = _cost(model)
-        # 1M cache_write @ $3.75 (mais caro que input fresh)
+        p = _preco(model)
         record_token_usage(
             model=model,
             input_tokens=1_000_000,
@@ -83,9 +99,12 @@ class TestRecordTokenUsage:
             output_tokens=0,
         )
         delta = _cost(model) - before
-        assert delta == pytest.approx(3.75, rel=1e-3)
+        assert delta == pytest.approx(p.cache_write, rel=1e-3)
+        # Escrever no cache custa mais que entrada fresca — é a premissa que
+        # justifica só cachear prefixo estável.
+        assert p.cache_write > p.input
 
-    def test_haiku_is_cheaper_than_sonnet(self):
+    def test_formatacao_e_mais_barata_que_raciocinio(self):
         reasoning = model_constants.REASONING
         formatting = model_constants.FORMATTING
         before_r = _cost(reasoning)
@@ -108,8 +127,8 @@ class TestRecordTokenUsage:
         r_cost = _cost(reasoning) - before_r
         f_cost = _cost(formatting) - before_f
         assert r_cost > f_cost
-        assert r_cost == pytest.approx(3.0, rel=1e-3)
-        assert f_cost == pytest.approx(1.0, rel=1e-3)
+        assert r_cost == pytest.approx(_preco(reasoning).input, rel=1e-3)
+        assert f_cost == pytest.approx(_preco(formatting).input, rel=1e-3)
 
     def test_tokens_recorded_in_buckets(self):
         model = model_constants.REASONING

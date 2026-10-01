@@ -38,7 +38,13 @@ class Settings(BaseSettings):
 
     # ---- Anthropic / Claude ----
     ANTHROPIC_API_KEY: str = ""
-    CLAUDE_MODEL_REASONING: str = "claude-sonnet-4-6"
+    # Raciocínio = Opus 5.5. No Opus 5.5 o *thinking* é SEMPRE ligado (mandar
+    # `thinking: disabled` ou `budget_tokens` devolve 400) e os tokens de
+    # raciocínio contam como SAÍDA, dentro do mesmo `CLAUDE_MAX_TOKENS_REASONING`
+    # abaixo. O `ClaudeClient` não envia nenhum desses parâmetros, nem
+    # `temperature`/`tool_choice` forçado, então a troca não esbarra nas
+    # mudanças que quebram — mas a saída cresce, e o custo com ela.
+    CLAUDE_MODEL_REASONING: str = "claude-opus-5-5"
     CLAUDE_MODEL_FORMATTING: str = "claude-haiku-4-5-20251001"
     CLAUDE_PROMPT_CACHE_ENABLED: bool = True
     # Teto de saída das chamadas de RACIOCÍNIO (chain_of_events, attack_path).

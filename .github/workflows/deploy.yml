@@ -74,7 +74,14 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: arn:aws:iam::314068109572:role/aperia-github-deploy
+          # `secrets` e nao `vars`: num repositorio PUBLICO os logs do Actions
+          # tambem sao publicos, e `vars` nao sao mascarados neles — tirar o id
+          # do arquivo e deixa-lo vazar no log nao resolveria nada.
+          #
+          # Higiene, nao correcao de falha: o id da conta nao e' credencial, e a
+          # trust policy deste papel so aceita OIDC deste repositorio. Esconde-lo
+          # apenas evita enumeracao de papeis.
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/aperia-github-deploy
           aws-region: us-east-1
       - name: Atualizar containers e migrar o banco
         run: |

@@ -6,10 +6,16 @@
 # valor nasce dentro da imagem, não havia como alinhar por default: é preciso
 # fixar a chave de fora.
 #
-# VALORES SÃO DE DESENVOLVIMENTO. Mesma postura do `ZAP_API_KEY=changeme` no
-# `.env.example`: o repositório versiona um valor que funciona de imediato e
-# documenta que produção deve trocar. `crypt_salt` e `encryption_key` abaixo
-# também são de dev — em produção, gere novos e não os versione.
+# VALORES SÃO DE DESENVOLVIMENTO, e versioná-los é deliberado: a stack local
+# sobe e funciona sem nenhum passo manual. Mesma postura do
+# `ZAP_API_KEY=changeme` no `.env.example`.
+#
+# `crypt_salt` e `encryption_key` abaixo também são de dev. Em produção eles
+# vivem em `caldera/local.aws.yml`, que o .gitignore cobre — gere os seus com
+# `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` e NÃO os
+# versione. Um scanner de segredos vai apontar as duas linhas abaixo; elas são
+# de desenvolvimento e o Caldera roda em rede `internal: true`, sem rota para
+# a internet.
 #
 # `api_key_red` precisa ser IGUAL a `CALDERA_API_KEY` no `.env` (default
 # `aperia-dev-caldera-red` em `app/config.py`). Divergir volta o 401.
@@ -38,8 +44,8 @@ app.contact.tunnel.ssh.user_password: s4ndc4t!
 app.contact.udp: 0.0.0.0:7011
 app.contact.websocket: 0.0.0.0:7012
 auth.login.handler.module: default
-crypt_salt: EGg3vOIXF-5WTAl8CoyRa2FqkDgA8oQ9uX4ROQDaiUk
-encryption_key: VLRXUt8plbcSclWLZ8K2SHpevhbB500htxhq0GKcMtU
+crypt_salt: Q5VE3aou3pJBh9ETDC8Q5EmSBVICIZ3h78b0D6FKqwQ
+encryption_key: d9FDj0QvRxjoAC8W1ICy4yh6g8iO_gUP9RJUvMqKKLc
 exfil_dir: /tmp/caldera
 host: 0.0.0.0
 objects.planners.default: atomic

@@ -158,7 +158,7 @@ curl -s http://localhost:8000/health   # {"status":"ok"}
 # + scanners T3: -f docker-compose.scanners.yml | + observabilidade: -f docker-compose.observability.yml
 ```
 
-Git: branch principal `main`. Docs de execução detalhadas em `GUIA_EXECUCAO.md` e `README.md`.
+Git: branch principal `main`. Arquitetura e execução local no `README.md`.
 
 ## Estado / pendências conhecidas
 

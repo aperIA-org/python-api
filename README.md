@@ -1,310 +1,123 @@
-# aperIA — ASPM com Heurística Ofensiva via I.A
+# aperIA — ASPM com heurística ofensiva via I.A
 
-aperIA é um **ASPM** (Application Security Posture Management) open-source que captura pushes/PRs do GitHub, executa uma esteira de 7+ ferramentas OSS em 3 tiers e usa Claude como motor central para raciocinar como um atacante: correlaciona findings, constrói attack paths e entrega patches como **GitHub code suggestions** para aprovação humana.
+Plataforma de *Application Security Posture Management*. Um pull request aciona
+um pipeline de scanners em três camadas; a I.A correlaciona os achados como um
+atacante faria — montando o caminho que liga uma falha à outra — e devolve as
+correções como **GitHub code suggestions** no próprio PR.
 
-> **Premissa inviolável de remediação:** aperIA nunca aplica código autonomamente. Todo patch é entregue como GitHub code suggestion. Merge fica bloqueado até aprovação explícita do desenvolvedor.
+> **Premissa inviolável:** o aperIA **nunca** aplica código sozinho. Todo patch
+> sai como sugestão para aprovação humana. O merge continua sendo decisão de
+> quem revisa.
 
----
-
-## ⚠️ Segurança operacional (LEIA ANTES DE SUBIR)
-
-Esta seção é **obrigatória** — projeto de segurança não pode depender de tribal knowledge.
-
-### Variáveis de ambiente obrigatórias
-
-Defina em `.env` na raiz do projeto: 
-
-```dotenv
-# ---- GitHub App (obrigatório para webhooks) ----
-GITHUB_APP_ID=123456
-GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_app_key.pem
-GITHUB_WEBHOOK_SECRET=<32+ chars aleatório>
-
-# ---- Anthropic (obrigatório para análise Claude) ----
-ANTHROPIC_API_KEY=sk-ant-<sua chave>
-CLAUDE_MODEL_REASONING=claude-sonnet-4-6
-CLAUDE_MODEL_FORMATTING=claude-haiku-4-5-20251001
-CLAUDE_PROMPT_CACHE_ENABLED=true
-
-# ---- Caldera (obrigatório se for usar Tier 3 emulation) ----
-CALDERA_URL=http://caldera:8888
-CALDERA_API_KEY=<API key gerada no boot do Caldera>
-CALDERA_SANDBOX_MODE=true        # ← OBRIGATÓRIO true em produção
-CALDERA_POLL_INTERVAL=10
-CALDERA_AGENT_GROUP=red
-
-# ---- OpenCTI (Tier 3 — enriquecimento CTI) ----
-OPENCTI_URL=http://opencti:8081
-OPENCTI_TOKEN=<token gerado no provisioning>
-
-# ---- ZAP (Tier 3 — DAST) ----
-ZAP_BASE_URL=http://zap:8090
-ZAP_API_KEY=<api key gerada no boot do ZAP>
-
-# ---- Celery / Redis ----
-REDIS_URL=redis://redis:6379/0
-# Não defina CELERY_TASK_ALWAYS_EAGER=true em produção — só nos testes.
-
-# ---- AI Security ----
-LLM_GUARD_ENABLED=true
-```
-
-### `CALDERA_SANDBOX_MODE=true` é INVIOLÁVEL
-
-`CalderaClient.__init__` valida `settings.CALDERA_SANDBOX_MODE` e levanta `SandboxViolationError` se for `false` — o serviço não sobe. Caldera executa técnicas MITRE ATT&CK **reais**; o único mecanismo que impede que movimento lateral em testes escape para sistemas em produção é o isolamento de rede.
-
-### Rede isolada do Caldera (`internal: true`)
-
-O `docker-compose.scanners.yml` declara a rede `aperia_caldera_sandbox` com `internal: true`. **Não remover essa flag** — significa que:
-
-- Containers nessa rede **não têm rota de saída** para internet ou outras redes Docker.
-- Agentes simulados (Sandcat, Manx) só conseguem se comunicar com o servidor Caldera dentro da rede.
-- Validação no host: `docker network inspect aperia_caldera_sandbox | grep Internal` deve retornar `"Internal": true`.
-
-### LLM Guard antes de toda chamada Claude
-
-`ClaudeClient.call()` e `call_json()` invocam `LLMGuardClient.check(user_prompt)` antes de enviar para a Anthropic API. Findings vêm de repositórios arbitrários — um atacante pode plantar payloads tipo `Ignore all previous instructions` em comentários de código. O guard heurístico bloqueia 15 padrões comuns de prompt injection. Mantenha `LLM_GUARD_ENABLED=true`.
-
-### Tier 1 nunca chama Claude
-
-`run_trufflehog` + `run_semgrep_changed` + `gate1_check` executam **zero chamadas LLM**. Um PR com chave AWS verificada é bloqueado em ≤ 3 minutos sem custo de token. Não introduza dependência de Claude em workers da fila `tier1`.
-
-### Logs nunca expõem secrets
-
-Todos os scanners usam `structlog` com campos estruturados. Em particular, `TruffleHogScanner` armazena o secret no `raw_output` da entidade `Finding` apenas para diagnóstico interno — esse campo **não vai para o PR comment**.
+A diferença em relação a um agregador de scanners está na segunda metade: em
+vez de entregar uma lista de centenas de achados isolados, o sistema pergunta
+quais deles se encadeiam numa rota de ataque real, e prioriza por isso.
 
 ---
 
 ## Arquitetura
 
+Clean Architecture. A dependência aponta sempre para dentro:
+
 ```
-PR (webhook) ou POST /repositories/{id}/scan (manual, sem PR)
-  → Tier 1 (≤ 3 min): TruffleHog + Semgrep changed
-      └── Gate 1: secret verificado → bloqueia PR + interrompe pipeline
-  → Tier 2 (≤ 10 min): Trivy + Semgrep expanded + Prowler (condicional IaC)
-      └── Claude Sonnet (chain_of_events) → relatório no PR
-      └── Gate 2: severidade < high → encerra aqui
-  → Tier 3 (30-60 min): ZAP + OpenCTI + Caldera
-      └── Claude Sonnet (attack_path) + Haiku (PR report)
-      └── Code suggestions inline para cada finding remediável
+presentation  →  application  →  domain  ←  infrastructure
 ```
 
-Os dois gatilhos passam pelo mesmo `dispatch_pipeline`
-(`app/application/use_cases/trigger_scan_use_case.py`) e montam o mesmo canvas.
-No scan manual (`pr_number=None`) não há PR onde comentar: o status check no
-commit continua sendo criado, e os relatórios ficam só na API
-(`GET /scans/{commit_sha}/report`).
-
-### Stack
-
-| Camada | Tecnologia |
+| Camada | Conteúdo |
 |---|---|
-| API | FastAPI + Pydantic v2 + pydantic-settings |
-| Filas | Celery 5.6 + Redis 7 (por tier) |
-| Banco | PostgreSQL 15 + asyncpg + Alembic |
-| LLM reasoning | Claude Sonnet 4.6 |
-| LLM formatação | Claude Haiku 4.5 |
-| Threat Intel | OpenCTI (GraphQL via `gql[requests]`) |
-| Emulação | MITRE Caldera 5.x (httpx, sandbox isolado) |
-| Secrets | TruffleHog CLI (`--only-verified`) |
-| SAST | Semgrep CLI (security-audit / auto) |
-| SCA + IaC + Containers | Trivy CLI |
-| DAST | OWASP ZAP REST API (active scan) |
-| CSPM | Prowler CLI (apenas se PR tem arquivos IaC) |
-| Git | GitHub App (JWT + installation_token) |
-| Observabilidade | Prometheus + Grafana + structlog |
+| `app/domain/` | entidades, value objects, interfaces de repositório. **Puro** — sem import externo |
+| `app/application/` | casos de uso |
+| `app/infrastructure/` | scanners, clientes de I.A e Git, persistência, segurança |
+| `app/presentation/` | rotas FastAPI, schemas e workers Celery |
+| `app/core/` | o canvas Celery (`orchestrator.py`) e a configuração do broker |
+
+O domínio não conhece FastAPI, SQLAlchemy nem a Anthropic. A infraestrutura
+implementa as interfaces que ele declara. Não há container de injeção: o wiring
+é manual, nas rotas via `Depends(get_db)` e nos workers por instanciação direta.
+
+### O pipeline
+
+Cinco filas Celery, uma por etapa, e dois portões que decidem se a execução
+continua:
+
+```
+Tier 1   TruffleHog (credenciais) + Semgrep (arquivos alterados)
+   │
+  Gate 1 ──── bloqueia se houver segredo VERIFICADO
+   │
+Tier 2   Trivy (dependências) + Semgrep (completo) + Prowler (nuvem)
+   │     → análise: correlação dos achados numa cadeia de eventos
+   │     → relatório no PR
+   │     → remediação: patches como code suggestion
+   │
+  Gate 2 ──── só escala se a severidade for alta ou crítica
+   │
+Tier 3   OWASP ZAP (DAST) + CISA KEV/EPSS (ameaças) + Caldera (emulação)
+   │     → análise profunda: caminho de ataque, impacto, veredito
+   │     → relatório final
+```
+
+> A interface do produto **não** nomeia a ferramenta por trás de cada etapa —
+> ela descreve o que a etapa faz. Os nomes aparecem aqui porque este é o
+> repositório do back-end, onde eles são o contrato com a API e com o banco.
+
+A escalada é condicional de propósito: as etapas caras só rodam quando o que
+veio antes justifica. Um PR sem achado relevante nunca chega ao Tier 3.
+
+Duas decisões que moldam o resto do código:
+
+**Nada derruba o pipeline.** Scanner que falha devolve lista vazia, I.A que
+falha devolve resposta degradada, persistência que falha registra e segue. Um
+scan parcial vale mais que um scan que não termina.
+
+**Dicionários trafegam no canvas, não entidades.** O Celery serializa em JSON
+entre as etapas, então os workers convertem na fronteira.
 
 ---
 
-## Instalação local (Docker)
+## Stack
 
-### Subir a stack base
-
-```bash
-# Necessário para Tier 1 e Tier 2 funcionar
-docker compose -f docker-compose.base.yml up -d
-```
-
-Sobe: api + 5 workers Celery (um por fila) + Redis + Postgres.
-
-### Adicionar scanners pesados (Tier 3)
-
-```bash
-docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml up -d
-```
-
-Adiciona: ZAP + OpenCTI + Caldera. **Caldera entra em rede isolada `internal:true`** — ver seção "Segurança operacional".
-
-### Adicionar observabilidade
-
-```bash
-docker compose -f docker-compose.base.yml -f docker-compose.observability.yml up -d
-```
-
-Adiciona: Prometheus (porta 9090) + Grafana (porta 3000, login `admin`/`changeme`).
-
-### Validar configuração sem subir
-
-```bash
-docker compose -f docker-compose.base.yml config
-docker compose -f docker-compose.base.yml -f docker-compose.scanners.yml config
-docker compose -f docker-compose.base.yml -f docker-compose.observability.yml config
-```
-
-### Aplicar migrations
-
-```bash
-docker compose exec api alembic upgrade head
-```
+FastAPI · Celery + Redis · PostgreSQL + SQLAlchemy + Alembic · Anthropic SDK ·
+structlog · pytest · Docker Compose
 
 ---
 
-## Demo end-to-end
-
-### Pré-requisitos
-
-1. GitHub App criada e instalada em um repositório de teste (use [WebGoat](https://github.com/WebGoat/WebGoat) ou similar — repo vulnerável conhecido)
-2. Webhook do App apontando para `https://<seu-ngrok>.ngrok.io/webhook/github`
-3. `.env` preenchido com os secrets do App
-
-### Fluxo da demo
-
-1. Crie um PR no repo de teste introduzindo uma chave AWS fake (formato válido, não ativa)
-2. Em ≤ 3 minutos: status check `failure` + comentário de bloqueio no PR (Gate 1)
-3. Crie outro PR com uma vulnerabilidade SQL injection (`f-string` em query)
-4. Em ≤ 10 minutos: comentário Tier 2 com chain of events + risk score
-5. Se severidade ≥ high: em ~30-60 minutos chega o relatório Tier 3 com attack path + code suggestions inline
-
-### Self-scan do aperIA
-
-O "hello world" do projeto é o **self-scan**: rodar a aperIA contra o próprio repositório.
+## Rodar local
 
 ```bash
-# Em outra branch, abre um PR contra main do aperIA
-git checkout -b self-scan-test
-echo "ghp_thisIsAFakeGitHubTokenForDemo1234567890" >> demo_secret.txt
-git add demo_secret.txt && git commit -m "demo: secret fake"
-git push origin self-scan-test
-gh pr create --title "self-scan: secret" --body "demo"
+docker compose -f docker-compose.base.yml up -d --build
+docker compose -f docker-compose.base.yml exec api alembic upgrade head
+curl -s http://localhost:8000/health          # {"status":"ok"}
+
+.venv/bin/python -m pytest tests/ -q
 ```
 
-O webhook detecta o PR, dispara o canvas Celery, e o Gate 1 bloqueia o PR. Fecha o ciclo: o sistema analisa o código que o criou.
+A base sobe API, worker, PostgreSQL e Redis — o suficiente para os Tiers 1 e 2.
+Os scanners pesados do Tier 3 ficam em `docker-compose.scanners.yml`, atrás de
+perfis (`--profile dast`, `--profile emulation`), porque consomem bem mais
+recurso que o resto da stack.
 
----
+Copie `.env.example` para `.env` antes de subir. Ele documenta cada variável,
+incluindo o registro do GitHub App.
 
-## Desenvolvimento
+### Segurança operacional
 
-### Rodar testes
+Três pontos que não são configuráveis por conveniência:
 
-```bash
-pip install -r requirements.txt
-pytest tests/ --cov-fail-under=70
-```
+- **O Caldera roda em rede isolada** (`internal: true`), sem rota para a
+  internet. É emulação de adversário: o agente executa técnicas reais.
+- **Toda chamada à I.A passa por um guard** que bloqueia o envio de material
+  sensível — um segredo encontrado por um scanner não vai para o prompt.
+- **O Tier 1 nunca chama a I.A.** É a camada que vê credenciais; mantê-la
+  offline é o que garante que elas não saem da máquina.
 
-A suíte:
-- `tests/unit/` — domínio + AI prompts + circuit breaker (sem I/O)
-- `tests/integration/` — scanners mockados via respx/requests-mock, repositórios em SQLite memória, workers Celery em modo eager
-- `tests/e2e/test_full_pipeline.py` — canvas completo mockando todas as dependências externas
-
-### Dashboards Grafana
-
-Após subir `docker-compose.observability.yml`, acesse <http://localhost:3000>. Dashboards provisionados:
-
-- **aperia-overview**: custo Claude (USD/dia), latência por tier, findings count por severity
-- **aperia-cost-breakdown**: tokens por modelo (input fresh / cache_read / cache_write / output), hit-rate do prompt cache, custo por PR
-
-Métricas expostas em `GET /metrics` (Prometheus format):
-
-- `claude_tokens_total{model, type}` — tokens por modelo e bucket
-- `claude_cost_usd_total{model}` — custo acumulado em USD
-- `claude_requests_total{model, outcome}` — sucesso / circuit_open / blocked_by_guard / error
-
-### Estrutura de pastas
-
-```
-app/
-├── application/           # use cases (sem lógica de negócio)
-│   └── remediation/
-├── core/                  # config, exceptions, celery_app, orchestrator
-├── domain/                # entidades, value objects, repos ABC (zero deps externas)
-│   ├── finding/
-│   ├── scan/
-│   ├── remediation/
-│   └── shared/
-├── infrastructure/        # implementações concretas
-│   ├── ai/                # ClaudeClient, LLM Guard, prompts, circuit breaker
-│   ├── database/          # SQLAlchemy sync + async
-│   ├── git/               # GitHubClient + auth JWT
-│   ├── intelligence/      # OpenCTIClient, CalderaClient
-│   ├── persistence/       # models SQLAlchemy
-│   ├── repositories/      # implementações concretas dos repos
-│   └── scanners/          # TruffleHog, Semgrep, Trivy, Prowler, ZAP
-└── presentation/
-    ├── api/routes/        # FastAPI routers (webhook, auth, health)
-    └── workers/           # Celery tasks (tier1/2/3, analysis, reporting)
-```
-
-### Regras invioláveis (CLAUDE.md)
-
-1. Remediação sempre humana — patches como code suggestion, merge bloqueado até aprovação
-2. LLM Guard antes de toda chamada Claude
-3. Caldera em sandbox isolado — `CALDERA_SANDBOX_MODE=true` validado no boot
-4. Tier 1 sem Claude
-5. Falha de scanner isolada — scanner down → skip + log, pipeline continua
-6. Falha do Claude não derruba pipeline — circuit breaker retorna findings brutos sem narrativa
-7. DDD: `app/domain/` sem imports externos, sem exceção
-8. Nunca PAT estático — GitHub App via `installation_id` → `installation_token`
-
----
-
-## Rotas
-
-| Método | Caminho | O que faz |
-|---|---|---|
-| `GET` | `/health` | Healthcheck |
-| `POST` | `/webhook/github` | Recebe webhook GitHub (HMAC obrigatório) |
-| `POST` | `/users` | Cria usuário (auth pré-existente) |
-| `GET` | `/users/{user_id}` | Consulta usuário por UUID |
-| `POST` | `/auth/login` | Login + emissão de tokens JWT |
-| `POST` | `/auth/refresh` | Refresh token rotation |
-| `POST` | `/auth/logout` | Revoga refresh token (204 sempre) |
-| `GET` | `/findings` | Lista findings persistidos (filtros + paginação; **JWT**) |
-| `GET` | `/findings/{finding_id}` | Detalhe de um finding, com `raw_output` (**JWT**) |
-| `GET` | `/scans` | Lista scans recentes / progresso do pipeline (**JWT**) |
-| `GET` | `/scans/{commit_sha}` | Status por tier de um scan + resumo de findings (**JWT**) |
-| `GET` | `/scans/{commit_sha}/report` | Relatórios de todos os tiers do commit (**JWT**) |
-| `GET` | `/scans/{commit_sha}/tiers/{tier}/report` | Relatório markdown de um tier específico (**JWT**) |
-| `GET` | `/github/connect` | Gera URL de instalação do App (`state` assinado) (**JWT**) |
-| `GET` | `/github/callback` | Callback pós-instalação; vincula a instalação ao usuário (`state`) |
-| `GET` | `/github/repos` | Lista repositórios visíveis pela instalação (**JWT**) |
-| `GET` `DELETE` | `/github/accounts[/{id}]` | Lista/desconecta contas GitHub conectadas; o `DELETE` remove junto os repositórios da conta e preserva findings/scans/relatórios (**JWT**) |
-| `POST` `GET` | `/repositories` | Ativa / lista repositórios conectados do usuário (**JWT**) |
-| `GET` `PATCH` `DELETE` | `/repositories/{id}` | Detalhe / ativar-desativar / remover (**JWT**) |
-| `POST` | `/repositories/{id}/scan` | Dispara scan manual no HEAD do branch default, sem PR (**JWT**) |
-| `GET` | `/repositories/{id}/scans\|findings\|reports` | Dados isolados por repositório (**JWT**) |
-| `GET` | `/metrics` | Prometheus metrics (latência, custo Claude, findings) — **ainda não exposto** |
-
-> **Multi-tenant:** as rotas de leitura são isoladas por usuário (JWT) — cada um só vê os próprios repositórios/scans/findings/relatórios. O webhook atribui o scan ao dono do repositório cadastrado.
-> **Pendência:** registrar o GitHub App (`GITHUB_APP_ID`/`GITHUB_PRIVATE_KEY_PATH`/`GITHUB_APP_SLUG`) para o fluxo de conexão funcionar.
-
-### Documentação da API (OpenAPI / Swagger)
-
-A app FastAPI gera a documentação a partir do próprio código (rotas + schemas
-Pydantic). Com a stack no ar:
-
-- **Swagger UI:** http://localhost:8000/docs
-- **ReDoc:** http://localhost:8000/redoc
-- **JSON cru:** http://localhost:8000/openapi.json
-
-Há também um snapshot versionado em [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1).
-Ele é **gerado** — não edite à mão. Após alterar rotas ou schemas, regenere com:
-
-```bash
-.venv/bin/python scripts/export_openapi.py
-```
+Os logs são estruturados e nunca registram segredo em claro.
 
 ---
 
 ## Licença
 
-Veja [LICENSE](LICENSE). Stack 100% open source — exceto a Claude API (Anthropic).
+[GNU General Public License v3.0](LICENSE) ou posterior.
+
+Copyleft: trabalhos derivados precisam ser distribuídos sob a mesma licença,
+com o código-fonte disponível.

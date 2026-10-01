@@ -71,7 +71,9 @@ class Settings(BaseSettings):
     # aplicação grande o active scan não converge em tempo de pipeline; com o
     # teto no lado do ZAP ele encerra sozinho, a fase chega a 100% e coletamos
     # os alertas parciais em vez de abandonar o scan e voltar de mãos vazias.
-    # Ver docs/explicacao-pipeline.md §13 para a escolha dos números.
+    # Os números saem do orçamento de tempo do Tier 3: spider curto para
+    # mapear a superfície, active scan com o grosso do tempo, e um teto por
+    # regra para que uma sozinha (SQLi time-based) não consuma o restante.
     ZAP_SPIDER_MAX_DURATION_MIN: int = 3
     # Filhos por nó que o crawler expande. Corta listagem grande (catálogo,
     # paginação), que é a mesma rota repetida e não agrega superfície nova.

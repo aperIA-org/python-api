@@ -157,7 +157,10 @@ def get_scan(
     com resumo de findings.
 
     O resumo é dos findings do **commit** — eles não são escopados por execução
-    (reexecutar o mesmo commit analisa o mesmo código). Ver docs/pendencias.md.
+    (reexecutar o mesmo commit analisa o mesmo código), então duas execuções do
+    mesmo commit devolvem a mesma contagem e diferem só no desfecho por
+    ferramenta, no risco e no status dos tiers. Com DAST ligado isso deixa de
+    ser verdade, porque o alvo pode ter mudado entre as duas.
     """
     job = _owned_job_or_404(db, scan_id, user_id)
 

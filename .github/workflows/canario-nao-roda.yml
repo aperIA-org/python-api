@@ -1,0 +1,24 @@
+# Canário de scan — NÃO MERGEAR.
+#
+# Existe para que um arquivo NÃO-Python entre no diff do PR e a sugestão seja
+# postada nele. Até aqui os achados de YAML sempre caíram em arquivos fora do
+# diff, então o caminho sem validação por `ast.parse` nunca foi exercido
+# contra o GitHub de verdade.
+#
+# `workflow_dispatch` é o único gatilho DE PROPÓSITO: assim este workflow
+# nunca executa sozinho. O que interessa é a tag mutável da action abaixo,
+# que o Semgrep sinaliza sem precisar rodar nada.
+name: canario-nao-roda
+
+on:
+  workflow_dispatch:
+
+jobs:
+  nunca-executa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: echo "este job nao roda automaticamente"

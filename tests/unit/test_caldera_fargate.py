@@ -13,23 +13,54 @@ from app.presentation.workers import tier3_scan_worker
 
 
 class _FakeEc2:
-    def __init__(self, orfaos=()):
+    """EC2 de mentira que modela o CICLO DE VIDA do endpoint, não só a chamada.
+
+    `delete_vpc_endpoints` na AWS é assíncrono: o endpoint passa por
+    `deleting` antes de sumir, e nesse intervalo ainda segura o DNS privado.
+    Um fake que apagasse na hora esconderia exatamente o bug que derrubou a
+    emulação em produção — e um que nunca apagasse faria o teste esperar o
+    prazo inteiro.
+
+    `ciclos_ate_sumir` é quantas leituras o endpoint sobrevive em `deleting`.
+    """
+
+    def __init__(self, orfaos=(), ciclos_ate_sumir=0):
         self.criados = []
         self.apagados = []
-        self._orfaos = list(orfaos)
+        self.ciclos_ate_sumir = ciclos_ate_sumir
+        # id -> [estado, leituras restantes em deleting]
+        self._efemeros = {e: ["available", 0] for e in orfaos}
 
     def create_vpc_endpoint(self, **kw):
         eid = f"vpce-{len(self.criados)}"
         self.criados.append(eid)
+        self._efemeros[eid] = ["available", 0]
         return {"VpcEndpoint": {"VpcEndpointId": eid}}
 
+    def _linhas(self, ids):
+        saida = []
+        for eid in ids:
+            estado, restantes = self._efemeros[eid]
+            saida.append({"VpcEndpointId": eid, "State": estado})
+            if estado == "deleting":
+                if restantes <= 0:
+                    self._efemeros[eid][0] = "deleted"
+                else:
+                    self._efemeros[eid][1] -= 1
+        return saida
+
     def describe_vpc_endpoints(self, **kw):
-        if "Filters" in kw:
-            return {"VpcEndpoints": [{"VpcEndpointId": e, "State": "available"} for e in self._orfaos]}
-        return {"VpcEndpoints": [{"VpcEndpointId": e, "State": "available"} for e in kw["VpcEndpointIds"]]}
+        alvos = (
+            [e for e, (estado, _) in self._efemeros.items() if estado != "deleted"]
+            if "Filters" in kw
+            else kw["VpcEndpointIds"]
+        )
+        return {"VpcEndpoints": self._linhas(alvos)}
 
     def delete_vpc_endpoints(self, **kw):
         self.apagados.extend(kw["VpcEndpointIds"])
+        for eid in kw["VpcEndpointIds"]:
+            self._efemeros[eid] = ["deleting", self.ciclos_ate_sumir]
 
 
 class _FakeEcs:
@@ -158,3 +189,81 @@ def test_agente_que_nunca_registra_estoura_prazo(monkeypatch):
 
     with pytest.raises(TimeoutError, match="nenhum agente"):
         caldera_fargate._aguardar_caldera("http://10.0.0.1:8888")
+
+
+# ── Corrida de DNS entre dois scans em Tier 3 ───────────────────────────────
+#
+# Em produção, dois scans seguidos derrubaram a emulação: o `finally` do
+# primeiro pediu a exclusão dos endpoints (chamada assíncrona) e o segundo
+# tentou criar os seus um segundo depois. O endpoint em `deleting` ainda era
+# dono de `api.ecr.<região>.amazonaws.com`, e a criação com
+# `PrivateDnsEnabled=True` falhou com `InvalidParameter`.
+
+
+def test_espera_o_endpoint_em_deleting_sumir_antes_de_criar(monkeypatch):
+    """O caso exato da produção: o órfão já está em `deleting` ao chegarmos.
+
+    A versão antiga ignorava `deleting` ("não há o que apagar") e seguia
+    direto para a criação — que batia no DNS ainda registrado.
+    """
+    ec2 = _FakeEc2(ciclos_ate_sumir=2)
+    ec2._efemeros["vpce-saindo"] = ["deleting", 2]
+    monkeypatch.setattr(caldera_fargate.time, "sleep", lambda s: None)
+
+    caldera_fargate._apagar_endpoints_orfaos(ec2)
+
+    # Não pede exclusão de novo — já estava indo embora.
+    assert ec2.apagados == []
+    # Mas só retorna quando o endpoint realmente sumiu.
+    assert caldera_fargate._efemeros_vivos(ec2) == {}
+
+
+def test_apaga_o_orfao_e_so_volta_quando_ele_some(monkeypatch):
+    ec2 = _FakeEc2(orfaos=["vpce-orfao"], ciclos_ate_sumir=3)
+    monkeypatch.setattr(caldera_fargate.time, "sleep", lambda s: None)
+
+    caldera_fargate._apagar_endpoints_orfaos(ec2)
+
+    assert ec2.apagados == ["vpce-orfao"]
+    assert caldera_fargate._efemeros_vivos(ec2) == {}
+
+
+def test_sem_efemeros_nao_espera_nada(monkeypatch):
+    """O caminho comum: nada pendente, a criação começa na hora."""
+    ec2 = _FakeEc2()
+    dormiu = []
+    monkeypatch.setattr(caldera_fargate.time, "sleep", lambda s: dormiu.append(s))
+
+    caldera_fargate._apagar_endpoints_orfaos(ec2)
+
+    assert dormiu == []
+    assert ec2.apagados == []
+
+
+def test_prazo_estourado_segue_em_frente_em_vez_de_levantar(monkeypatch):
+    """Travar aqui seria pior: o caminho de Caldera indisponível já existe.
+
+    A criação a seguir falha com o ClientError de sempre e o Tier 3 continua
+    sem emulação — o que este ramo acrescenta é o log que explica a causa.
+    """
+    ec2 = _FakeEc2(orfaos=["vpce-teimoso"], ciclos_ate_sumir=10**6)
+    monkeypatch.setattr(caldera_fargate.time, "sleep", lambda s: None)
+    monkeypatch.setattr(caldera_fargate, "_PRAZO_EXCLUSAO_ENDPOINT", 0)
+
+    caldera_fargate._apagar_endpoints_orfaos(ec2)  # não levanta
+
+    assert caldera_fargate._efemeros_vivos(ec2) != {}
+
+
+def test_deleted_nao_conta_como_vivo():
+    """`deleted` já liberou o DNS; só `deleting` ainda segura."""
+    ec2 = _FakeEc2()
+    ec2._efemeros = {
+        "vpce-foi": ["deleted", 0],
+        "vpce-saindo": ["deleting", 5],
+        "vpce-ativo": ["available", 0],
+    }
+    assert caldera_fargate._efemeros_vivos(ec2) == {
+        "vpce-saindo": "deleting",
+        "vpce-ativo": "available",
+    }

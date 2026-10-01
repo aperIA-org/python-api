@@ -35,6 +35,10 @@ _BOOT_TIMEOUT_S = 600
 _SERVICOS = ("ecr.api", "ecr.dkr", "logs")
 _TAG_EFEMERO = [{"Key": "project", "Value": "aperia"}, {"Key": "efemero", "Value": "true"}]
 
+#: Quanto esperar um endpoint sair de ``deleting``. Na prática leva poucos
+#: segundos; o teto existe para não prender o worker se a AWS travar.
+_PRAZO_EXCLUSAO_ENDPOINT = 180
+
 
 @contextmanager
 def caldera_sob_demanda(url_fixa: str, commit_sha: str = "") -> Iterator[str]:
@@ -127,18 +131,68 @@ def _criar_endpoints(ec2, subnet: str) -> list[str]:
         time.sleep(10)
 
 
-def _apagar_endpoints_orfaos(ec2) -> None:
-    """Rede de segurança: um ``finally`` que não rodou deixaria custo por hora."""
-    orfaos = [
-        e["VpcEndpointId"]
+def _efemeros_vivos(ec2) -> dict[str, str]:
+    """Endpoints efêmeros que ainda existem, por id → estado.
+
+    ``deleting`` conta como vivo, e é esse o ponto: o endpoint já não aparece
+    para quem olha custo, mas **ainda segura o domínio DNS privado**.
+    """
+    return {
+        e["VpcEndpointId"]: e["State"]
         for e in ec2.describe_vpc_endpoints(
             Filters=[{"Name": "tag:efemero", "Values": ["true"]}]
         )["VpcEndpoints"]
-        if e["State"] not in ("deleting", "deleted")
-    ]
-    if orfaos:
-        logger.warning("caldera_endpoints_orfaos_removidos", endpoints=orfaos)
-        ec2.delete_vpc_endpoints(VpcEndpointIds=orfaos)
+        if e["State"] != "deleted"
+    }
+
+
+def _apagar_endpoints_orfaos(ec2) -> None:
+    """Limpa os efêmeros e **espera sumirem** antes de deixar criar os novos.
+
+    Duas razões, e a segunda custou um scan:
+
+    1. Custo: um ``finally`` que não rodou deixaria endpoint cobrando por hora.
+    2. DNS: ``delete_vpc_endpoints`` é assíncrono. O endpoint fica em
+       ``deleting`` por alguns segundos e nesse intervalo **continua dono** de
+       ``api.ecr.<região>.amazonaws.com`` na VPC. Criar o próximo com
+       ``PrivateDnsEnabled=True`` aí falha com
+       ``InvalidParameter: there is already a conflicting DNS domain``.
+
+    A versão anterior ignorava ``deleting`` — "já está indo embora, não há o
+    que apagar" — e seguia direto para a criação. Correto quanto a custo,
+    errado quanto a DNS: com dois scans em Tier 3 em sequência, o segundo
+    começava um segundo depois de o primeiro pedir a exclusão e batia no nome
+    ainda registrado. Em produção isso derrubou a emulação de dois scans
+    seguidos, com um intervalo de 1s entre o fim de um e a falha do outro.
+
+    Estourar o prazo não interrompe nada: a criação a seguir vai falhar com o
+    ``ClientError`` de sempre, e o Tier 3 segue sem emulação. O log daqui é o
+    que torna essa falha explicável quando acontecer.
+    """
+    vivos = _efemeros_vivos(ec2)
+    if not vivos:
+        return
+
+    pedir_exclusao = [i for i, estado in vivos.items() if estado != "deleting"]
+    if pedir_exclusao:
+        logger.warning("caldera_endpoints_orfaos_removidos", endpoints=pedir_exclusao)
+        ec2.delete_vpc_endpoints(VpcEndpointIds=pedir_exclusao)
+
+    prazo = time.monotonic() + _PRAZO_EXCLUSAO_ENDPOINT
+    while True:
+        restantes = _efemeros_vivos(ec2)
+        if not restantes:
+            return
+        if time.monotonic() > prazo:
+            # Seguir e deixar a criação falhar é melhor do que levantar aqui:
+            # o caminho de Caldera indisponível já existe e não derruba o scan.
+            logger.warning(
+                "caldera_endpoints_ainda_em_exclusao",
+                endpoints=restantes,
+                aviso="a criacao a seguir deve falhar por conflito de DNS",
+            )
+            return
+        time.sleep(5)
 
 
 def _aguardar_caldera(url: str) -> None:

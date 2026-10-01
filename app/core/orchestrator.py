@@ -38,6 +38,7 @@ from celery import chain, group
 from app.core.celery_app import celery_app
 from app.presentation.workers import (
     analysis_worker,
+    remediation_worker,
     reporting_worker,
     tier1_scan_worker,
     tier2_scan_worker,
@@ -244,6 +245,14 @@ def build_pipeline_canvas(
         # tier2_analyze precisa de gate1_output como pos arg → bridge.
         | _bridge_t1_findings_into_analyze.s(commit_sha=commit_sha)
         | reporting_worker.post_tier2_report.s(
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            commit_sha=commit_sha,
+            installation_id=installation_id,
+        )
+        # Remediação dos findings de código. Devolve ``analysis`` intacta —
+        # o gate a seguir decide a escalada em cima dela.
+        | remediation_worker.suggest_remediations.s(
             repo_full_name=repo_full_name,
             pr_number=pr_number,
             commit_sha=commit_sha,

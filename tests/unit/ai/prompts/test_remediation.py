@@ -45,10 +45,17 @@ _SECRET_FINDING = {
 
 class TestNoAutoApplyContract:
     def test_system_contains_exact_no_apply_clause(self):
+        """A garantia é a mesma da decisão #4; a redação mudou com o formato.
+
+        O contrato deixou de pedir diff unificado (o modelo não o produzia de
+        forma aplicável) e passou a pedir as linhas de substituição. A cláusula
+        foi reescrita junto, mas o que ela proíbe é idêntico: executar,
+        aplicar, commitar.
+        """
         required = (
-            "Gere apenas o diff do patch. Não execute, não aplique, "
-            "não faça commit. A aplicação é responsabilidade exclusiva "
-            "do desenvolvedor via code suggestion."
+            "Você NÃO gera diff, NÃO executa, NÃO aplica e NÃO faz commit. "
+            "Você devolve as linhas de código que substituem um trecho — a "
+            "aplicação é responsabilidade exclusiva do desenvolvedor."
         )
         assert required in remediation.SYSTEM
 
@@ -70,12 +77,30 @@ class TestNoAutoApplyContract:
 class TestSchema:
     def test_system_defines_all_required_fields(self):
         for field in (
-            "patch_diff",
+            "start_line",
+            "end_line",
+            "original",
+            "replacement",
             "explanation",
             "requires_secret_rotation",
             "rotation_instructions",
         ):
             assert field in remediation.SYSTEM
+
+    def test_system_nao_pede_mais_diff_unificado(self):
+        """Pedir diff é o que quebrava o `suggestion` — não pode voltar.
+
+        O bloco ```suggestion do GitHub substitui as linhas ancoradas pelo
+        conteúdo LITERAL. Um diff ali faz o "Apply suggestion" escrever `@@`,
+        `-` e `+` dentro do arquivo de quem clicou.
+        """
+        assert "patch_diff" not in remediation.SYSTEM
+        assert "diff unificado" not in remediation.SYSTEM
+
+    def test_system_exige_indentacao_literal(self):
+        """O modelo colapsava o recuo; o prompt tem que falar disso."""
+        assert "indentação" in remediation.SYSTEM
+        assert "NNNN: " in remediation.SYSTEM
 
 
 # -----------------------------------------------------------------------------

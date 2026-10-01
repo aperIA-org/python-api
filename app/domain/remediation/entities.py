@@ -25,3 +25,27 @@ class Remediation:
     approved_by: str | None = None
     approved_at: datetime | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass(frozen=True)
+class RemediationComContexto:
+    """Uma remediação mais o que a tela mostra ao redor dela.
+
+    A ``Remediation`` sozinha é um patch sem origem: o card do dashboard
+    precisa do título e da severidade do finding, e do PR onde a sugestão foi
+    postada. Esses campos moram em ``findings`` e ``scan_jobs``, e a consulta já
+    passa pelas duas tabelas de qualquer jeito — o join com ``scan_jobs`` é o
+    que prova a posse, já que ``remediations`` não tem ``user_id``.
+
+    Trazer tudo de uma vez evita a alternativa: a tela buscar o conjunto inteiro
+    de findings do usuário só para resolver algumas dezenas de remediações.
+    """
+
+    remediation: Remediation
+    finding_title: str | None
+    finding_severity: str | None
+    finding_file_path: str | None
+    finding_repo_url: str | None
+    repo_full_name: str | None
+    pr_number: int | None
+    commit_sha: str | None

@@ -767,3 +767,36 @@ def test_title_do_grupo_reabre_exatamente_as_ocorrencias_do_grupo(session):
 
     for grupo in repo.group_by_type():
         assert repo.count(title=grupo.title) == grupo.ocorrencias, grupo.title
+
+
+def test_find_duplicate_acha_titulo_com_dois_pontos(session):
+    """O título do TruffleHog contém `:` — e isso derrubava a busca.
+
+    A implementação antiga desmontava a `dedup_key` com `split(":", 4)` e
+    procurava pelos pedaços. Com `"Possível secret (não verificado): URI"` as
+    fatias saíam trocadas, o `int()` do número da linha estourava, e a função
+    devolvia `None` para uma linha que estava lá. Nenhum erro, nenhum log —
+    só a remediação daquele finding sumindo.
+    """
+    repo = SQLAlchemyFindingRepository(session)
+    finding = Finding(
+        source="trufflehog",
+        severity=Severity.MEDIUM,
+        title="Possível secret (não verificado): URI",
+        description="x",
+        commit_sha="a" * 40,
+        repo_url="https://github.com/x/y",
+        file_path="tests/integration/test_repository_routes.py",
+        line_number=305,
+        tier=1,
+    )
+    repo.bulk_save([finding])
+    session.commit()
+
+    achado = repo.find_duplicate(finding.dedup_key())
+    assert achado is not None
+    assert achado.title == finding.title
+    assert achado.line_number == 305
+
+    # E continua não achando o que não existe.
+    assert repo.find_duplicate("trufflehog:nada:x.py:1:" + "a" * 40) is None

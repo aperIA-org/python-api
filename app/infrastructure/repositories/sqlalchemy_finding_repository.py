@@ -380,24 +380,21 @@ class SQLAlchemyFindingRepository(FindingRepository):
         return [m.to_entity() for m in result.scalars().all()]
 
     def find_duplicate(self, dedup_key: str) -> Finding | None:
-        # dedup_key format: "source:cve_or_title:file_path:line_number:commit_sha"
-        # Implementação simples: faz parse e busca. Em produção este método
-        # raramente é chamado — bulk_save com ON CONFLICT é o caminho principal.
-        parts = dedup_key.split(":", 4)
-        if len(parts) != 5:
-            return None
-        source, key, file_path, line_str, commit_sha = parts
-        try:
-            line_number = int(line_str) if line_str != "None" else None
-        except ValueError:
-            return None
+        """Busca a linha por ``dedup_key`` — comparando a coluna, não um parse.
+
+        A versão anterior desmontava a chave com ``split(":", 4)`` e buscava
+        pelos pedaços. Funciona só enquanto nenhum campo contém dois-pontos, e
+        o título contém: um finding do TruffleHog se chama
+        ``"Possível secret (não verificado): URI"``, então a quarta fatia
+        virava ``"305:<commit>"``, o ``int()`` estourava e a função devolvia
+        ``None`` para uma linha que existia. Silencioso — indistinguível de
+        "não achei".
+
+        A ``dedup_key`` é uma coluna gravada, com UNIQUE em cima
+        (``findings_dedup_key``). Comparar a coluna é exato e usa o índice.
+        """
         result = self.db.execute(
-            select(FindingModel).where(
-                FindingModel.source == source,
-                FindingModel.commit_sha == commit_sha,
-                FindingModel.file_path == (file_path if file_path != "None" else None),
-                FindingModel.line_number == line_number,
-            )
+            select(FindingModel).where(FindingModel.dedup_key == dedup_key)
         )
         model = result.scalars().first()
         return model.to_entity() if model else None

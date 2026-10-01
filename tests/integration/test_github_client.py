@@ -71,8 +71,9 @@ def test_post_inline_suggestion_formats_suggestion_block(client):
         pr_number=5,
         commit_sha="abc",
         file_path="app/db.py",
+        start_line=42,
         line=42,
-        patch_diff="SELECT 1",
+        suggestion_body="SELECT 1",
         explanation="Use prepared statement",
     )
 
@@ -81,6 +82,36 @@ def test_post_inline_suggestion_formats_suggestion_block(client):
     assert "```suggestion\\nSELECT 1\\n```" in body
     assert '"side":"RIGHT"' in body
     assert '"path":"app/db.py"' in body
+    # Uma linha só: o GitHub recusa `start_line` igual a `line`.
+    assert "start_line" not in body
+
+
+@respx.mock
+def test_post_inline_suggestion_ancora_intervalo_multilinha(client):
+    """Substituição de várias linhas precisa de `start_line`.
+
+    Sem isso o GitHub troca só a linha ancorada e o resto do bloco entra como
+    inserção — o arquivo fica com o trecho velho e o novo, um embaixo do outro.
+    """
+    route = respx.post(
+        "https://api.github.com/repos/acme/repo/pulls/5/comments"
+    ).mock(return_value=Response(201, json={"id": 99}))
+
+    client.post_inline_suggestion(
+        repo_full_name="acme/repo",
+        pr_number=5,
+        commit_sha="abc",
+        file_path="app/db.py",
+        start_line=40,
+        line=43,
+        suggestion_body="linha a\nlinha b",
+        explanation="troca o bloco",
+    )
+
+    body = route.calls.last.request.content.decode()
+    assert '"start_line":40' in body
+    assert '"start_side":"RIGHT"' in body
+    assert '"line":43' in body
 
 
 @respx.mock

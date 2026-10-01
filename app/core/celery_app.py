@@ -40,6 +40,7 @@ WORKER_MODULES: tuple[str, ...] = (
     "app.presentation.workers.tier3_scan_worker",
     "app.presentation.workers.analysis_worker",
     "app.presentation.workers.reporting_worker",
+    "app.presentation.workers.remediation_worker",
     "app.core.orchestrator",
 )
 
@@ -101,6 +102,7 @@ def _build_celery_app() -> Celery:
             "app.presentation.workers.tier1_scan_worker.*": {"queue": "tier1"},
             "app.presentation.workers.analysis_worker.*": {"queue": "analysis"},
             "app.presentation.workers.reporting_worker.*": {"queue": "reporting"},
+            "app.presentation.workers.remediation_worker.*": {"queue": "reporting"},
             "app.presentation.workers.tier2_scan_worker.*": {"queue": "tier2"},
             "app.presentation.workers.tier3_scan_worker.*": {"queue": "tier3"},
             "app.core.orchestrator._t1_to_t2_scan_bridge": {"queue": "tier2"},

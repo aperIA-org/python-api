@@ -333,7 +333,6 @@ ZAP + verificação de segredo e o Caldera fica para host/infra?
 
 | Tela | Fonte hoje | Caminho |
 |---|---|---|
-| Remediações | mock | **não existe rota na API** |
 | AI Emulation | mock | sai do `analysis_json` do relatório de Tier 3 |
 | Time | mock | **não existe rota na API** |
 | Scanners (em Repositórios) | mock | `GET /scans/{id}/tools` já existe (§6.2) — falta a tela ler |
@@ -344,6 +343,42 @@ a tela passar a ler a API.
 **Ordem sugerida.** AI Emulation primeiro: é a única com fonte disponível hoje,
 e o `analysis_json` do Tier 3 ficou mais rico agora que a narrativa do Claude
 volta a ser gerada.
+
+### Remediações — RESOLVIDO (2026-09-30)
+
+A pendência dizia "mock · não existe rota na API". O diagnóstico era pior: a
+fatia vertical inteira existia no back-end — entidade, tabela, migration,
+repositório, prompt, `SuggestPatchUseCase` — **e nada a chamava**. A tabela
+`remediations` nunca recebeu uma linha, então uma rota de leitura sobre ela
+teria devolvido lista vazia para sempre.
+
+O que entrou:
+
+- `remediation_worker.suggest_remediations` no canvas, entre
+  `post_tier2_report` e `tier3_gate`, devolvendo `analysis` intacta. Só
+  findings de tier 1 e 2 com `file_path`+`line_number`, mais graves primeiro,
+  teto em `REMEDIATION_MAX_PER_SCAN` (10). **DAST fica de fora**: o ZAP
+  reporta o mesmo alerta uma vez por rota e nenhum deles tem linha de código
+  onde ancorar um patch.
+- A fatia virou síncrona. Era o último `AsyncSession` do `app/`, sem engine
+  async para sustentá-lo desde que ele foi removido.
+- `SuggestPatchUseCase` passou a aceitar `pr_number=None`: scan manual
+  persiste a remediação com `github_comment_id=None` em vez de não gerar nada.
+- `GET /remediations` e `PATCH /remediations/{id}/status`. Posse pelo join com
+  `scan_jobs` (a tabela não tem `user_id`); 404 para remediação de outro dono,
+  409 para decisão já tomada.
+
+**A armadilha que custou um teste dedicado.** `remediations.finding_id` é FK
+para `findings.id`, e o id que trafega no canvas é o `uuid4` que a dataclass
+gerou em memória. Num re-scan do mesmo commit esse id nunca chega ao banco: o
+`ON CONFLICT DO NOTHING` de `bulk_save` descarta o insert e a linha existente
+mantém o id antigo. O worker resolve o id pela `dedup_key`
+(`remediation_worker._id_persistido`) — sem isso, todo re-scan violaria a FK.
+
+Fora de escopo, de propósito: `ia-remediacao` no `tool_catalog` (o id é
+contrato com o front e os gates passariam a marcá-lo `skipped`); o status
+`merged`, que depende de webhook de PR review; e a contagem de remediações por
+scan no card de Scans, que custaria uma requisição por card.
 
 ---
 

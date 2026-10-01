@@ -54,23 +54,64 @@ class GitHubClient:
         pr_number: int,
         commit_sha: str,
         file_path: str,
+        start_line: int,
         line: int,
-        patch_diff: str,
+        suggestion_body: str,
         explanation: str,
     ) -> int:
-        body = f"{explanation}\n\n```suggestion\n{patch_diff}\n```"
+        """Posta um code suggestion ancorado no intervalo ``start_line..line``.
+
+        ``suggestion_body`` são as LINHAS LITERAIS que substituem o trecho —
+        nunca um diff. O GitHub troca o intervalo ancorado pelo conteúdo do
+        bloco tal e qual: mandar ``@@``/``-``/``+`` aqui faz o "Apply
+        suggestion" escrever os marcadores dentro do arquivo. Quem garante
+        esse formato é ``domain/remediation/patch_suggestion.verificar``.
+
+        ``start_line`` só vai no payload quando o intervalo tem mais de uma
+        linha — a API do GitHub recusa ``start_line`` igual a ``line``.
+        """
+        body = f"{explanation}\n\n```suggestion\n{suggestion_body}\n```"
+        payload = {
+            "body": body,
+            "commit_id": commit_sha,
+            "path": file_path,
+            "line": line,
+            "side": "RIGHT",
+        }
+        if start_line < line:
+            payload["start_line"] = start_line
+            payload["start_side"] = "RIGHT"
         resp = self.client.post(
             f"{self.BASE}/repos/{repo_full_name}/pulls/{pr_number}/comments",
-            json={
-                "body": body,
-                "commit_id": commit_sha,
-                "path": file_path,
-                "line": line,
-                "side": "RIGHT",
-            },
+            json=payload,
         )
         resp.raise_for_status()
         return resp.json()["id"]
+
+    def list_pr_files(self, repo_full_name: str, pr_number: int) -> set[str]:
+        """Caminhos tocados pelo PR, que é onde o GitHub aceita comentário.
+
+        A API recusa com 422 um comentário inline ancorado fora do diff, e o
+        scan enxerga o repositório inteiro — num PR de um arquivo, o Tier 2
+        ainda acha problema em tudo que já estava lá. Sem este filtro, cada um
+        desses vira uma chamada ao Claude seguida de uma recusa garantida.
+        """
+        caminhos: set[str] = set()
+        pagina = 1
+        while True:
+            resp = self.client.get(
+                f"{self.BASE}/repos/{repo_full_name}/pulls/{pr_number}/files",
+                params={"per_page": 100, "page": pagina},
+            )
+            resp.raise_for_status()
+            lote = resp.json()
+            if not lote:
+                break
+            caminhos.update(item["filename"] for item in lote)
+            if len(lote) < 100:
+                break
+            pagina += 1
+        return caminhos
 
     def get_pr_diff(self, repo_full_name: str, pr_number: int) -> str:
         resp = self.client.get(

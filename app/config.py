@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     # (ver tests/conftest.py) para não exigir Postgres.
     FINDINGS_PERSISTENCE_ENABLED: bool = True
 
+    # ---- Geração de remediações ----
+    # Quantos patches um scan pode gerar. Cada finding selecionado é UMA
+    # chamada ao Claude, e um scan com DAST produz ordens de grandeza mais
+    # findings do que faz sentido remediar automaticamente — o teto é o que
+    # impede um scan ruim de virar conta. Só findings de código (tier 1 e 2)
+    # concorrem; ver ``remediation_worker``.
+    REMEDIATION_MAX_PER_SCAN: int = 10
+
     # ---- Persistência de status de scan (ScanJob) ----
     # Liga a escrita best-effort do ciclo de vida do ScanJob (criação no
     # start_pipeline + updates de status por tier nos workers). Mesmo

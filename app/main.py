@@ -23,6 +23,9 @@ from app.presentation.api.routes.auth_routes import router as auth_router
 from app.presentation.api.routes.finding_routes import router as finding_router
 from app.presentation.api.routes.github_routes import router as github_router
 from app.presentation.api.routes.health_routes import router as health_router
+from app.presentation.api.routes.remediation_routes import (
+    router as remediation_router,
+)
 from app.presentation.api.routes.repository_routes import router as repository_router
 from app.presentation.api.routes.scan_routes import router as scan_router
 from app.presentation.api.routes.user_routes import router as user_router
@@ -163,6 +166,7 @@ app.include_router(health_router)
 app.include_router(user_router)
 app.include_router(auth_router)
 app.include_router(finding_router)
+app.include_router(remediation_router)
 app.include_router(scan_router)
 app.include_router(github_router)
 app.include_router(repository_router)

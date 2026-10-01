@@ -33,11 +33,13 @@ FORMATTING: str = settings.CLAUDE_MODEL_FORMATTING
 # nunca por strings literais. Atualizar quando a Anthropic mudar
 # o pricing.
 PRICING: dict[str, ModelPricing] = {
+    # Opus 5.5. Atenção ao trocar o modelo: estes números alimentam as
+    # métricas de custo, e esquecê-los faz o painel mentir em silêncio.
     REASONING: ModelPricing(
-        input=3.0,
-        output=15.0,
-        cache_read=0.30,
-        cache_write=3.75,
+        input=4.0,
+        output=20.0,
+        cache_read=0.20,
+        cache_write=5.00,
     ),
     FORMATTING: ModelPricing(
         input=1.0,
